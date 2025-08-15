@@ -1,0 +1,28 @@
+- name: "glibc"
+  version: "2.38"
+  arch: "x86_64"
+  description: "GNU C Library"
+  deps: []
+  files:
+    - "usr/lib64/glibc.so.1"
+    - "usr/share/man/man1/glibc.1"
+
+- name: "coreutils"
+  version: "9.4"
+  arch: "x86_64"
+  description: "GNU core utilities"
+  deps:
+    - glibc
+  files:
+    - "usr/bin/coreutils"
+    - "usr/share/man/man1/unix.1"
+
+- name: "bash"
+  version: "5.2"
+  arch: "x86_64"
+  description: "The GNU Bourne-Again SHell"
+  deps:
+    - glibc
+  files:
+    - "usr/bin/bash"
+    - "usr/share/man/man1/bash.1"

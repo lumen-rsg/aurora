@@ -1,0 +1,16 @@
+name: "aurora"
+version: "3.0.1"
+arch: "x86_64"
+
+deps:
+  - sqlite
+  - yaml-cpp
+
+makedepends:
+  - cmake
+  - gcc
+
+conflicts: ["gradient"]
+replaces: [] # Test an empty list
+
+description: "A test package."

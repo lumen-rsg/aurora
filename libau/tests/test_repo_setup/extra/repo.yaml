@@ -1,0 +1,24 @@
+- name: "nano"
+  version: "7.2"
+  arch: "x86_64"
+  description: "A small, friendly text editor"
+  deps:
+    - glibc
+  files:
+    - "usr/bin/nano"
+    - "usr/share/man/man1/nano.1"
+
+- name: "broken-package"
+  # version is missing, which is a required field
+  arch: "x86_64"
+  description: "This package definition is intentionally broken."
+
+- name: "curl"
+  version: "8.4.0"
+  arch: "x86_64"
+  description: "A command line tool for transferring data with URL syntax"
+  deps:
+    - glibc
+  files:
+    - "usr/bin/curl"
+    - "usr/share/man/man1/curl.1"
