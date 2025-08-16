@@ -2,8 +2,8 @@
 // Created by cv2 on 8/15/25.
 //
 
-#include "package_manager.h"
-#include "logging.h"
+#include "../include/package_manager.h"
+#include "../include/logging.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>

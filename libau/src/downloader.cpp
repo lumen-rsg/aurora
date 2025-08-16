@@ -2,8 +2,8 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "downloader.h"
-#include "logging.h"
+#include "libau/downloader.h"
+#include "libau/logging.h"
 #include <curl/multi.h>
 #include <chrono>
 #include <iomanip>

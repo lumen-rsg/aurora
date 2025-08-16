@@ -2,9 +2,9 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "database.h"
-#include "dependency_resolver.h"
-#include "logging.h"
+#include "../include/database.h"
+#include "../include/dependency_resolver.h"
+#include "../include/logging.h"
 #include <cassert>
 #include <filesystem>
 #include <vector>

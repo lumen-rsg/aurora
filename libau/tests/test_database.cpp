@@ -2,11 +2,11 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "database.h"
-#include "logging.h"
+#include "../include/database.h"
+#include "../include/logging.h"
 #include <cassert>
 #include <filesystem>
-#include <algorithm>
+#include <algorithm>s
 
 const std::filesystem::path TEST_DB_PATH = "test_au.db";
 

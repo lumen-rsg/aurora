@@ -2,13 +2,13 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "database.h"
-#include "logging.h"
+#include "libau/database.h"
+#include "libau/logging.h"
 #include <sstream> // For string joining/splitting
 
 // This is a big header, so we include it only in the .cpp file.
 #define SQLITE_ORM_OMITS_CODECVT // Avoids deprecation warnings with C++17 and later
-#include "sqlite_orm.h"
+#include "external/sqlite_orm.h"
 
 namespace au {
 

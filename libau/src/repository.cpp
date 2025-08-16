@@ -2,11 +2,11 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "repository.h"
-#include "database.h"
-#include "downloader.h"
-#include "parser.h"
-#include "logging.h"
+#include "libau/repository.h"
+#include "libau/database.h"
+#include "libau/downloader.h"
+#include "libau/parser.h"
+#include "libau/logging.h"
 
 #include <fstream>
 #include <sstream>

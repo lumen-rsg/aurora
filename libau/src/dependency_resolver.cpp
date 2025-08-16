@@ -2,8 +2,8 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "dependency_resolver.h"
-#include "logging.h" // For error messages
+#include "libau/dependency_resolver.h"
+#include "libau/logging.h" // For error messages
 
 #include <algorithm> // For std::reverse
 

@@ -1,8 +1,8 @@
 //
 // Created by cv2 on 8/15/25.
 //
-#include "downloader.h"
-#include "logging.h"
+#include "../include/downloader.h"
+#include "../include/logging.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>

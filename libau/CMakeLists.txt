@@ -1,5 +1,18 @@
 # --- libau/CMakeLists.txt ---
 
+cmake_minimum_required(VERSION 3.22)
+
+# 1. Define the entire project ONE TIME.
+project(aurora LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 3. Find all dependencies for all components in ONE place.
+find_package(SQLite3 REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(CURL REQUIRED)
+
 # Define the library target.
 add_library(au STATIC
         src/archive.cpp
@@ -11,12 +24,8 @@ add_library(au STATIC
         src/repository.cpp
 )
 
-# Define the include directories for this target.
-# PUBLIC: Anyone who links to `au` will automatically get this include path.
-target_include_directories(au
-        PUBLIC
+target_include_directories(au PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        PRIVATE
         "${CMAKE_SOURCE_DIR}/vendor"
 )
 
@@ -43,3 +52,6 @@ install(EXPORT au-targets
         NAMESPACE au::
         DESTINATION lib/cmake/libau
 )
+
+enable_testing()
+add_subdirectory(tests)

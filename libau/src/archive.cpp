@@ -1,10 +1,11 @@
-#include "archive.h"
-#include "logging.h"
+#include "libau/archive.h"
+#include "libau/logging.h"
 #include <cstdio>
 #include <memory>
 #include <array>
 #include <stdexcept>
 #include <sys/wait.h>
+#include <sstream>
 
 namespace au::archive {
 

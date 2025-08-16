@@ -2,14 +2,14 @@
 // Created by cv2 on 8/14/25.
 //
 
-#include "package_manager.h"
-#include "downloader.h"
-#include "logging.h"
-#include "archive.h" // Needed for extraction
+#include "libau/package_manager.h"
+#include "libau/downloader.h"
+#include "libau/logging.h"
+#include "libau/archive.h" // Needed for extraction
 #include <chrono>
 #include <iomanip>
 #include <sstream>
-#include "parser.h"
+#include "libau/parser.h"
 #include <map>
 #include <sys/wait.h>
 

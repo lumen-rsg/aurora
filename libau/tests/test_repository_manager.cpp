@@ -2,9 +2,9 @@
 // Created by cv2 on 8/15/25.
 //
 
-#include "database.h"
-#include "repository.h"
-#include "logging.h"
+#include "../include/database.h"
+#include "../include/repository.h"
+#include "../include/logging.h"
 #include <cassert>
 #include <filesystem>
 

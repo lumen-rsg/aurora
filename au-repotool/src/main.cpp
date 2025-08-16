@@ -8,10 +8,11 @@
 #include <algorithm>
 
 // Include our library headers
-#include <logging.h>
-#include <parser.h>
+#include "parser.h"
+#include "repository.h"
 #include <archive.h>
 #include <package.h>
+#include "logging.h"
 
 // Include our new YAML writer and the yaml-cpp library
 #include "yaml_writer.h"
