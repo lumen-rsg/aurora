@@ -81,6 +81,10 @@ namespace au {
         std::expected<void, TransactionError> update_system();
         bool sync_database();
 
+        std::expected<Transaction, TransactionError> plan_update_transaction();
+
+        std::expected<Transaction, TransactionError> plan_remove_transaction(const std::vector<std::string>& package_names);
+
     private:
         std::filesystem::path m_root_path; // The target system's root directory
         std::filesystem::path m_db_path;
@@ -92,9 +96,8 @@ namespace au {
         bool is_dependency_satisfied(const std::string& dep_name) const;
         bool run_pre_script(const std::filesystem::path& script_path, const std::filesystem::path& target_root) const;
         bool run_post_script(const std::filesystem::path& script_path_in_root, bool use_chroot) const;
-        std::expected<Transaction, TransactionError> plan_remove_transaction(const std::vector<std::string>& package_names);
+
         int compare_versions(const std::string& v1, const std::string& v2) const;
-        std::expected<Transaction, TransactionError> plan_update_transaction();
     };
 
 } // namespace au
