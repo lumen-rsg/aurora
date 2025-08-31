@@ -511,6 +511,33 @@ namespace au {
 
         // --- 3. Build the final Transaction Plan ---
         Transaction plan;
+
+        // --- NEW LOGIC: Check for Conflicts and handle Replaces ---
+        for (const auto& pkg_meta : packages_to_install) {
+            // 1. Check for conflicts against currently installed packages.
+            for (const auto& conflict_name : pkg_meta.conflicts) {
+                if (m_db.is_package_installed(conflict_name)) {
+                    log::error("Conflict detected: package '" + pkg_meta.name +
+                               "' conflicts with installed package '" + conflict_name + "'.");
+                    return std::unexpected(TransactionError::ConflictDetected);
+                }
+            }
+
+            // 2. Handle 'replaces' by adding the target to the removal list.
+            for (const auto& replace_name : pkg_meta.replaces) {
+                auto target_pkg_opt = m_db.get_installed_package(replace_name);
+                if (target_pkg_opt) {
+                    // To avoid duplicates, check if it's already in the to_remove list
+                    if (std::find_if(plan.to_remove.begin(), plan.to_remove.end(),
+                                     [&](const auto& p){ return p.name == replace_name; }) == plan.to_remove.end()) {
+                        log::info("Package '" + pkg_meta.name + "' replaces '" + replace_name + "', scheduling it for removal.");
+                        plan.to_remove.push_back(*target_pkg_opt);
+                    }
+                }
+            }
+        }
+        // --- END NEW LOGIC ---
+
         for (const auto& pkg_meta : packages_to_install) {
             PackageInstallation install_item;
             install_item.metadata = pkg_meta;

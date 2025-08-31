@@ -9,11 +9,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(yaml-cpp REQUIRED)
-find_package(au REQUIRED)
 
 # 3. Find all dependencies for all components in ONE place.
 
 add_executable(repotool src/main.cpp)
-target_include_directories(repotool PRIVATE "/usr/local/include")
+target_include_directories(repotool PRIVATE external)
 
 target_link_libraries(repotool PRIVATE au yaml-cpp::yaml-cpp)

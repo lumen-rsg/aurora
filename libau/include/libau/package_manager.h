@@ -38,6 +38,7 @@ namespace au {
         ExtractionFailed,
         ScriptletFailed,
         FileSystemError,
+        ConflictDetected,
         DependencyViolation // NEW: For reverse dependency check
     };
 

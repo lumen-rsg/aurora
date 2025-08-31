@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <package.h> // Include from libau
+#include <libau/package.h> // Include from libau
 #include <yaml-cpp/yaml.h> // We need the yaml-cpp library
 
 // Converts our C++ Package struct into a YAML Node for writing.

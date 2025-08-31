@@ -9,7 +9,7 @@
 
 // Our library and UI helpers
 #include "ui_helpers.h"
-#include "../../libau/include/package_manager.h"
+#include <libau/package.h>
 
 void print_usage() {
     ui::error("Invalid usage.");

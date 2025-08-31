@@ -8,11 +8,12 @@
 #include <algorithm>
 
 // Include our library headers
-#include "parser.h"
-#include "repository.h"
-#include <archive.h>
-#include <package.h>
-#include "logging.h"
+#include <libau/parser.h>
+#include <libau/repository.h>
+#include <libau/archive.h>
+#include <libau/package.h>
+#include <libau/logging.h>
+#include "external/cxxopts.hpp"
 
 // Include our new YAML writer and the yaml-cpp library
 #include "yaml_writer.h"
@@ -140,29 +141,86 @@ int cmd_remove(const std::filesystem::path& repo_dir, const std::string& package
     return 1;
 }
 
+int cmd_meta_gen(const cxxopts::ParseResult& result) {
+    if (!result.count("pkgname") || !result.count("pkgver")) {
+        au::log::error("meta-gen requires at least --pkgname and --pkgver.");
+        return 1;
+    }
+
+    au::Package pkg;
+    pkg.name = result["pkgname"].as<std::string>();
+    pkg.version = result["pkgver"].as<std::string>();
+    pkg.description = result["pkgdesc"].as<std::string>();
+    pkg.arch = result["arch"].as<std::string>();
+    pkg.repo_name = result["repo_name"].as<std::string>();
+
+    if (result.count("depend")) pkg.deps = result["depend"].as<std::vector<std::string>>();
+    if (result.count("makedepend")) pkg.makedepends = result["makedepend"].as<std::vector<std::string>>();
+    if (result.count("conflict")) pkg.conflicts = result["conflict"].as<std::vector<std::string>>();
+    if (result.count("provide")) pkg.provides = result["provide"].as<std::vector<std::string>>();
+    if (result.count("replace")) pkg.replaces = result["replace"].as<std::vector<std::string>>();
+
+    pkg.pre_install_script = result["pre_install"].as<std::string>();
+    pkg.post_install_script = result["post_install"].as<std::string>();
+    pkg.pre_remove_script = result["pre_remove"].as<std::string>();
+    pkg.post_remove_script = result["post_remove"].as<std::string>();
+
+    YAML::Node node = package_to_yaml(pkg);
+    std::cout << node << std::endl;
+
+    return 0;
+}
+
 
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
+    if (argc < 2) {
         print_usage();
         return 1;
     }
 
     std::string command = argv[1];
-    std::filesystem::path repo_dir = argv[2];
 
-    if (command == "init") {
-        return cmd_init(repo_dir);
-    } else if (command == "add") {
-        if (argc < 4) { print_usage(); return 1; }
-        return cmd_add(repo_dir, argv[3]);
-    } else if (command == "remove") {
-        if (argc < 4) { print_usage(); return 1; }
-        return cmd_remove(repo_dir, argv[3]);
+    if (command == "init" || command == "add" || command == "remove") {
+        if (argc < 3) { print_usage(); return 1; }
+        std::filesystem::path repo_dir = argv[2];
+
+        if (command == "init") {
+            return cmd_init(repo_dir);
+        } else if (command == "add") {
+            if (argc < 4) { print_usage(); return 1; }
+            return cmd_add(repo_dir, argv[3]);
+        } else if (command == "remove") {
+            if (argc < 4) { print_usage(); return 1; }
+            return cmd_remove(repo_dir, argv[3]);
+        }
+    } else if (command == "meta-gen") {
+        cxxopts::Options options("repotool meta-gen", "Generates .AURORA_META from PKGBUILD variables");
+        options.add_options()
+                ("pkgname", "Package name", cxxopts::value<std::string>())
+                ("pkgver", "Package version", cxxopts::value<std::string>())
+                ("pkgdesc", "Package description", cxxopts::value<std::string>()->default_value(""))
+                ("arch", "Package architecture", cxxopts::value<std::string>()->default_value("any"))
+                ("repo_name", "Repository name", cxxopts::value<std::string>()->default_value(""))
+                ("depend", "Runtime dependency", cxxopts::value<std::vector<std::string>>())
+                ("makedepend", "Build-time dependency", cxxopts::value<std::vector<std::string>>())
+                ("checkdepend", "Check-time dependency", cxxopts::value<std::vector<std::string>>())
+                ("conflict", "Package conflict", cxxopts::value<std::vector<std::string>>())
+                ("provide", "Provided virtual package", cxxopts::value<std::vector<std::string>>())
+                ("replace", "Replaced package", cxxopts::value<std::vector<std::string>>())
+                ("pre_install", "Pre-install script path", cxxopts::value<std::string>()->default_value(""))
+                ("post_install", "Post-install script path", cxxopts::value<std::string>()->default_value(""))
+                ("pre_remove", "Pre-remove script path", cxxopts::value<std::string>()->default_value(""))
+                ("post_remove", "Post-remove script path", cxxopts::value<std::string>()->default_value(""))
+                ;
+
+        // Parse from the arguments *after* the "meta-gen" command
+        auto result = options.parse(argc - 2, argv + 2);
+        return cmd_meta_gen(result);
+
     } else {
         au::log::error("Unknown command: " + command);
         print_usage();
         return 1;
     }
-
     return 0;
 }

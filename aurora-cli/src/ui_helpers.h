@@ -7,8 +7,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include "../../libau/include/package_manager.h"
-#include "../../libau/include/package.h"
+#include <libau/package_manager.h>
+#include <libau/package.h>
 
 namespace ui {
 
