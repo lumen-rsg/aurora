@@ -63,13 +63,10 @@ namespace au {
         explicit PackageManager(const std::filesystem::path& system_root = "/");
 
         // High-level operations that create and execute a transaction.
-        std::expected<void, TransactionError> install(const std::vector<std::string>& package_names);
-        std::expected<void, TransactionError> remove(const std::vector<std::string>& package_names);
+        std::expected<void, TransactionError> install(const std::vector<std::string>& package_names, bool force = false);
+        std::expected<void, TransactionError> remove(const std::vector<std::string>& package_names, bool force = false);
 
         // --- Core Transactional Methods ---
-
-        // 1. Plan: Resolve dependencies, figure out what to download.
-        std::expected<Transaction, TransactionError> plan_install_transaction(const std::vector<std::string>& package_names);
 
         // 2. Prepare: Download and verify all needed files for the transaction.
         std::expected<void, TransactionError> prepare_transaction_assets(Transaction& transaction);
@@ -78,13 +75,13 @@ namespace au {
         std::expected<void, TransactionError> execute_transaction(const Transaction& plan);
 
         // NEW: Install a single local package file.
-        std::expected<void, TransactionError> install_local_package(const std::filesystem::path& package_path);
-        std::expected<void, TransactionError> update_system();
+        std::expected<void, TransactionError> update_system(bool force = false);
+        std::expected<void, TransactionError> install_local_package(const std::filesystem::path& package_path, bool force = false);
         bool sync_database();
 
-        std::expected<Transaction, TransactionError> plan_update_transaction();
-
-        std::expected<Transaction, TransactionError> plan_remove_transaction(const std::vector<std::string>& package_names);
+        std::expected<Transaction, TransactionError> plan_install_transaction(const std::vector<std::string>& package_names, bool force = false);
+        std::expected<Transaction, TransactionError> plan_remove_transaction(const std::vector<std::string>& package_names, bool force = false);
+        std::expected<Transaction, TransactionError> plan_update_transaction(bool force = false);
 
     private:
         std::filesystem::path m_root_path; // The target system's root directory

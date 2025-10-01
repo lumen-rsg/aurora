@@ -20,6 +20,7 @@ namespace ui {
     const char* const RED = "\033[1;31m";
     const char* const YELLOW = "\033[1;33m";
     const char* const CYAN = "\033[0;36m";
+    const char* const MAGENTA = "\033[1;35m"; // NEW
 
 // --- Formatted Printing Functions ---
 

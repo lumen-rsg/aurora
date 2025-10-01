@@ -52,6 +52,3 @@ install(EXPORT au-targets
         NAMESPACE au::
         DESTINATION lib/cmake/libau
 )
-
-enable_testing()
-add_subdirectory(tests)

@@ -229,8 +229,16 @@ namespace au {
 
 // --- Public Method Implementations ---
 
-    Database::Database(const std::filesystem::path& db_path)
-            : pimpl(std::make_unique<Impl>(db_path)) {}
+
+    Database::Database(const std::filesystem::path& db_path){
+        // A class should be responsible for its own environment. Before trying to
+        // open the database file, ensure its parent directory exists.
+        if (db_path.has_parent_path()) {
+            std::filesystem::create_directories(db_path.parent_path());
+        }
+        // Now it is safe to initialize the database connection.
+        pimpl = std::make_unique<Impl>(db_path);
+    }
 
     Database::~Database() = default; // Important for unique_ptr with incomplete type
 

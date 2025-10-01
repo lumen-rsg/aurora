@@ -41,9 +41,8 @@ namespace au {
                 return std::unexpected(TransactionError::ResolutionFailed);
             }
 
-            std::string url = *repo_url_opt + "/" + pkg.name + "-" + pkg.version + ".pkg.tar.zst";
-            download_paths.push_back(m_cache_path / (pkg.name + "-" + pkg.version + ".pkg.tar.zst"));
-
+            std::string url = *repo_url_opt + "/" + pkg.name + "-" + pkg.version + ".au";
+            download_paths.push_back(m_cache_path / (pkg.name + "-" + pkg.version + ".au"));
             jobs->emplace_back(
                     url,
                     download_paths.back(),
@@ -170,7 +169,7 @@ namespace au {
         return false;
     }
 
-    std::expected<Transaction, TransactionError> PackageManager::plan_remove_transaction(const std::vector<std::string>& package_names) {
+    std::expected<Transaction, TransactionError> PackageManager::plan_remove_transaction(const std::vector<std::string>& package_names, bool force) {
         log::info("Planning removal transaction...");
         Transaction plan;
 
@@ -199,8 +198,10 @@ namespace au {
                 // Check if this 'other_pkg' depends on the package we're trying to remove.
                 for (const auto& dep : other_pkg.deps) {
                     if (dep == pkg_name) {
-                        log::error("Cannot remove '" + pkg_name + "': required by installed package '" + other_pkg.name + "'.");
-                        return std::unexpected(TransactionError::DependencyViolation);
+                        if (!force) {
+                            log::error("Cannot remove '" + pkg_name + "': required by installed package '" + other_pkg.name + "'.");
+                            return std::unexpected(TransactionError::DependencyViolation);
+                        }
                     }
                 }
             }
@@ -209,7 +210,7 @@ namespace au {
         return plan;
     }
 
-    std::expected<void, TransactionError> PackageManager::install_local_package(const std::filesystem::path& package_path) {
+    std::expected<void, TransactionError> PackageManager::install_local_package(const std::filesystem::path& package_path, bool force) {
         log::info("Attempting to install local package: " + package_path.string());
 
         // --- Phase 1: Metadata Extraction and Parsing ---
@@ -236,16 +237,20 @@ namespace au {
         // 2. Check dependencies
         for (const auto& dep : pkg.deps) {
             if (!is_dependency_satisfied(dep)) {
-                log::error("Unsatisfied dependency for '" + pkg.name + "': " + dep);
-                return std::unexpected(TransactionError::ResolutionFailed);
+                if (!force) {
+                    log::error("Unsatisfied dependency for '" + pkg.name + "': " + dep);
+                    return std::unexpected(TransactionError::ResolutionFailed);
+                }
             }
         }
 
         // 3. Check conflicts
         for (const auto& conflict : pkg.conflicts) {
             if (m_db.is_package_installed(conflict)) {
-                log::error("Conflict detected: '" + pkg.name + "' conflicts with installed package '" + conflict + "'.");
-                return std::unexpected(TransactionError::FileConflict); // Using this for package conflicts
+                if (!force) {
+                    log::error("Conflict detected: '" + pkg.name + "' conflicts with installed package '" + conflict + "'.");
+                    return std::unexpected(TransactionError::FileConflict); // Using this for package conflicts
+                }
             }
         }
 
@@ -355,12 +360,12 @@ namespace au {
                     std::stringstream ss;
                     ss << std::oct << (perm_val & 07777); // Mask to get relevant permission bits
 
-                    std::string command = "/usr/bin/install -D -m " + ss.str() + " " + source.string() + " " + dest.string();
+                    std::string command = "cp -a " + staging_path.string() + "/. " + m_root_path.string() + "/";
                     int status = std::system(command.c_str());
 
                     if (WEXITSTATUS(status) != 0) {
-                        log::error("Failed to install file from staging: " + source.string());
-                        throw TransactionError::FileSystemError; // Trigger rollback
+                        log::error("Failed to copy package payload from staging for " + pkg.name);
+                        throw TransactionError::FileSystemError;
                     }
 
                 }
@@ -443,9 +448,9 @@ namespace au {
     }
 
     // The high-level install function that ties the plan-prepare-execute sequence together
-    std::expected<void, TransactionError> PackageManager::install(const std::vector<std::string>& package_names) {
+    std::expected<void, TransactionError> PackageManager::install(const std::vector<std::string>& package_names, bool force) {
         // 1. Plan
-        auto plan_result = plan_install_transaction(package_names);
+        auto plan_result = plan_install_transaction(package_names, force);
         if (!plan_result) {
             return std::unexpected(plan_result.error());
         }
@@ -466,7 +471,7 @@ namespace au {
 
     }
 
-    std::expected<Transaction, TransactionError> PackageManager::plan_install_transaction(const std::vector<std::string>& package_names) {
+    std::expected<Transaction, TransactionError> PackageManager::plan_install_transaction(const std::vector<std::string>& package_names, bool force) {
         log::info("Planning installation transaction...");
 
         // 1. Resolve dependencies to get a topologically sorted list.
@@ -499,11 +504,13 @@ namespace au {
                 auto it = all_owned_files.find(new_file);
                 if (it != all_owned_files.end()) {
                     // Conflict found!
-                    const std::string& owner_pkg_name = it->second;
-                    log::error("File conflict detected! Package '" + pkg_meta.name +
-                               "' wants to install '" + new_file.string() +
-                               "', which is already owned by '" + owner_pkg_name + "'.");
-                    return std::unexpected(TransactionError::FileConflict);
+                    if (!force) {
+                        const std::string& owner_pkg_name = it->second;
+                        log::error("File conflict detected! Package '" + pkg_meta.name +
+                                   "' wants to install '" + new_file.string() +
+                                   "', which is already owned by '" + owner_pkg_name + "'.");
+                        return std::unexpected(TransactionError::FileConflict);
+                    }
                 }
             }
         }
@@ -517,9 +524,11 @@ namespace au {
             // 1. Check for conflicts against currently installed packages.
             for (const auto& conflict_name : pkg_meta.conflicts) {
                 if (m_db.is_package_installed(conflict_name)) {
-                    log::error("Conflict detected: package '" + pkg_meta.name +
-                               "' conflicts with installed package '" + conflict_name + "'.");
-                    return std::unexpected(TransactionError::ConflictDetected);
+                    if (!force) {
+                        log::error("Conflict detected: package '" + pkg_meta.name +
+                                   "' conflicts with installed package '" + conflict_name + "'.");
+                        return std::unexpected(TransactionError::ConflictDetected);
+                    }
                 }
             }
 
@@ -550,9 +559,9 @@ namespace au {
         return plan;
     }
 
-    std::expected<void, TransactionError> PackageManager::remove(const std::vector<std::string>& package_names) {
+    std::expected<void, TransactionError> PackageManager::remove(const std::vector<std::string>& package_names, bool force) {
         // 1. Plan
-        auto plan_result = plan_remove_transaction(package_names);
+        auto plan_result = plan_remove_transaction(package_names, force);
         if (!plan_result) {
             return std::unexpected(plan_result.error());
         }
@@ -567,7 +576,7 @@ namespace au {
         return execute_transaction(plan);
     }
 
-    std::expected<Transaction, TransactionError> PackageManager::plan_update_transaction() {
+    std::expected<Transaction, TransactionError> PackageManager::plan_update_transaction(bool force) {
         log::info("Planning system update...");
 
         if (!m_repo_manager.update_all()) {
@@ -644,7 +653,7 @@ namespace au {
     }
 
 
-    std::expected<void, TransactionError> PackageManager::update_system() {
+    std::expected<void, TransactionError> PackageManager::update_system(bool force) {
         // 1. Plan the transaction.
         auto plan_result = plan_update_transaction();
         if (!plan_result) {

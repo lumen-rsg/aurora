@@ -23,7 +23,7 @@ void print_usage() {
     std::cerr << "aurora-repotool - A tool for managing Aurora package repositories.\n\n"
               << "Usage:\n"
               << "  repotool init <repo_directory>\n"
-              << "  repotool add <repo_directory> <package_file.pkg.tar.zst>\n"
+              << "  repotool add <repo_directory> <package_file.au>\n"
               << "  repotool remove <repo_directory> <package_name>\n";
 }
 

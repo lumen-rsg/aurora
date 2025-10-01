@@ -38,42 +38,47 @@ namespace au::archive {
     }
 
     std::expected<std::vector<std::filesystem::path>, ExtractError> extract(
-            const std::filesystem::path& archive_path,
-            const std::filesystem::path& destination_path)
+        const std::filesystem::path& archive_path,
+        const std::filesystem::path& destination_path)
     {
         std::filesystem::create_directories(destination_path);
 
-        // Phase 1: List contents (this is a safe read-only operation)
-        std::string list_command = "tar -t -f " + archive_path.string();
+        // --- Phase 1: Extract the entire archive ---
+        // We do NOT change the CWD of our C++ program.
+        // We tell `tar` to extract its contents into the destination directory.
+        std::string extract_command = "tar -x -f " + archive_path.string() + " -C " + destination_path.string();
+
+        int status = std::system(extract_command.c_str());
+        if (WEXITSTATUS(status) != 0) {
+            log::error("tar extraction command failed with exit code: " + std::to_string(WEXITSTATUS(status)));
+            return std::unexpected(ExtractError::ExtractData);
+        }
+
+        // --- Phase 2: Generate a reliable file list ---
+        // After extraction, we use `find` inside the destination to get a list
+        // of ONLY regular files, ignoring directories and symlinks.
         std::vector<std::filesystem::path> extracted_files;
         try {
-            std::string file_list_str = exec_and_capture(list_command.c_str());
+            CWDGuard guard; // Safely change directory for the find command
+            std::filesystem::current_path(destination_path);
+
+            // `find . -type f` is the most reliable way to list only files.
+            std::string file_list_str = exec_and_capture("find . -type f");
+
             std::stringstream ss(file_list_str);
             std::string line;
             while (std::getline(ss, line)) {
-                if (line.empty() || line.back() == '/') continue;
-                if (line.rfind("./", 0) == 0) line = line.substr(2);
+                // Strip the leading "./"
+                if (line.rfind("./", 0) == 0) {
+                    line = line.substr(2);
+                }
+                if (line.empty() || line == ".AURORA_META") {
+                    continue;
+                }
                 extracted_files.emplace_back(line);
             }
         } catch (const std::exception& e) {
-            log::error("Failed to list archive contents: " + std::string(e.what()));
-            return std::unexpected(ExtractError::ReadHeader);
-        }
-
-        // Phase 2: Extract the archive safely
-        try {
-            CWDGuard guard; // Automatically changes back to original path on scope exit.
-            std::filesystem::current_path(destination_path);
-
-            std::string command = "tar -x -f " + archive_path.string();
-
-            int status = std::system(command.c_str());
-            if (WEXITSTATUS(status) != 0) {
-                log::error("tar extraction command failed with exit code: " + std::to_string(WEXITSTATUS(status)));
-                return std::unexpected(ExtractError::ExtractData);
-            }
-        } catch (const std::exception& e) {
-            log::error("Filesystem error during extraction: " + std::string(e.what()));
+            log::error("Failed to generate file list after extraction: " + std::string(e.what()));
             return std::unexpected(ExtractError::InternalError);
         }
 
