@@ -316,4 +316,22 @@ namespace au {
         return std::nullopt;
     }
 
+    std::vector<Package> Database::list_all_repo_packages() const {
+        // 1. Get all records from the 'repo_packages' table.
+        auto all_db_pkgs = pimpl->storage.get_all<db_schema::RepoPackage>();
+
+        std::vector<Package> result;
+        // Reserve memory upfront for efficiency.
+        result.reserve(all_db_pkgs.size());
+
+        // 2. Loop and convert each record.
+        for (const auto& db_pkg : all_db_pkgs) {
+            // Use the existing from_db helper to convert the schema object to a Package object.
+            result.push_back(from_db(db_pkg));
+        }
+
+        // 3. Return the completed list.
+        return result;
+    }
+
 } // namespace au

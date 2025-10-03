@@ -12,7 +12,7 @@ namespace au::log {
 
     // Helper function to format the output consistently
     inline void print(const std::string& level, const std::string& color_code, const std::string& msg) {
-        std::cout << color_code << "au :: [" << level << "] :: " << "\033[0m" << msg << std::endl;
+        std::cout << color_code << "[" << level << "] > " << "\033[0m" << msg << std::endl;
     }
 
     inline void ok(const std::string& msg) {
@@ -26,6 +26,22 @@ namespace au::log {
 
     inline void info(const std::string& msg) {
         print("..", "\033[1;34m", msg); // Bold Blue
+    }
+
+    // Prints a progress message without a newline, and flushes the output.
+    // This is for showing what is currently happening.
+    inline void progress(const std::string& msg) {
+        // \r: Carriage return (moves cursor to the beginning of the line)
+        // \033[K: Erase from the cursor to the end of the line
+        std::cout << "\r\033[K"
+                  << "\033[1;34m" << "[..] > " << "\033[0m" // Blue header
+                  << msg << std::flush;
+    }
+
+    // Prints a green "[OK]" message and finally moves to the next line.
+    // This is for showing that a series of progress steps has completed.
+    inline void progress_ok() {
+        std::cout << " [" << "\033[1;32m" << "OK" << "\033[0m" << "]" << std::endl;
     }
 
 } // namespace au::log

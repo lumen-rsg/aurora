@@ -35,55 +35,32 @@ msg "Parsing .PKGINFO metadata..."
 pkginfo_get() { grep "^$1 =" .PKGINFO | head -n 1 | sed "s/$1 = //"; }
 pkginfo_get_array() { grep "^$1 =" .PKGINFO | sed "s/$1 = //"; }
 pkgname=$(pkginfo_get "pkgname"); pkgver=$(pkginfo_get "pkgver" | sed 's/-[0-9.]*$//'); pkgdesc=$(pkginfo_get "pkgdesc"); arch=$(pkginfo_get "arch")
-mapfile -t depends < <(pkginfo_get_array "depend"); mapfile -t conflicts < <(pkginfo_get_array "conflict")
-mapfile -t replaces < <(pkginfo_get_array "replaces"); mapfile -t provides < <(pkginfo_get_array "provides")
+mapfile -t depends < <(pkginfo_get_array "depend")
+mapfile -t conflicts < <(pkginfo_get_array "conflict")
+mapfile -t replaces < <(pkginfo_get_array "replaces")
+mapfile -t provides < <(pkginfo_get_array "provides")
 
 # --- .INSTALL file parsing logic ---
 declare -A SCRIPTS_TO_GENERATE
 if [[ -f ".INSTALL" ]]; then
     msg "Found .INSTALL script, parsing functions..."
     mkdir -p scripts
-
     extract_function() {
         local func_name_arg=$1
         awk -v target_func="$func_name_arg" '$0 ~ "^" target_func "\\(\\) \\{" { in_func=1; brace_level=1; next } in_func { brace_level += gsub(/{/, "{"); brace_level -= gsub(/}/, "}"); if (brace_level > 0) print; else in_func=0; }' .INSTALL
     }
-
     for func in pre_install post_install pre_remove post_remove pre_upgrade post_upgrade; do
         body=$(extract_function "$func")
         if [[ -n "$body" ]]; then
             aurora_key=""
-            # --- FIX #1: Handle function redirection (upgrade -> install) ---
             case "$func" in
-                pre_upgrade)
-                    # If the body is just a call to pre_install, use its body instead.
-                    if [[ "$(echo "$body" | xargs)" == "pre_install" ]]; then
-                        msg "  -> '${func}()' is a wrapper for 'pre_install()', using its content."
-                        body=$(extract_function "pre_install")
-                    fi
-                    aurora_key="pre_install"
-                    ;;
-                post_upgrade)
-                    # If the body is just a call to post_install, use its body instead.
-                    if [[ "$(echo "$body" | xargs)" == "post_install" ]]; then
-                        msg "  -> '${func}()' is a wrapper for 'post_install()', using its content."
-                        body=$(extract_function "post_install")
-                    fi
-                    aurora_key="post_install"
-                    ;;
-                *)
-                    aurora_key="$func"
-                    ;;
+                pre_upgrade) if [[ "$(echo "$body" | xargs)" == "pre_install" ]]; then body=$(extract_function "pre_install"); fi; aurora_key="pre_install" ;;
+                post_upgrade) if [[ "$(echo "$body" | xargs)" == "post_install" ]]; then body=$(extract_function "post_install"); fi; aurora_key="post_install" ;;
+                *) aurora_key="$func" ;;
             esac
-
-            # If after all that we still have a body, create the script.
             if [[ -n "$body" ]]; then
-                script_path="scripts/${aurora_key}.sh"
-                msg "  -> Found content for '${aurora_key}', creating '${script_path}'"
-                echo -e "#!/bin/sh\n\n# Extracted from .INSTALL\n" > "$script_path"
-                echo "$body" >> "$script_path"
-                # --- FIX #2: Make the generated script executable ---
-                chmod +x "$script_path"
+                script_path="scripts/${aurora_key}.sh"; msg "  -> Found content for '${aurora_key}', creating '${script_path}'"
+                echo -e "#!/bin/sh\n\n# Extracted from .INSTALL\n" > "$script_path"; echo "$body" >> "$script_path"; chmod +x "$script_path"
                 SCRIPTS_TO_GENERATE["$aurora_key"]="$script_path"
             fi
         fi
@@ -94,7 +71,24 @@ msg "Generating new .AURORA_META file for '${pkgname}'..."
 {
     printf "name: \"%s\"\n" "$pkgname"; printf "version: \"%s\"\n" "$pkgver"
     printf "arch: \"%s\"\n" "$arch"; printf "description: \"%s\"\n" "$pkgdesc"
-    if [[ "${#depends[@]}" -gt 0 ]]; then printf "deps:\n"; for dep in "${depends[@]}"; do printf "  - %s\n" "$(echo "$dep" | sed 's/[<>=].*//')"; done; fi
+
+    # --- THIS IS THE ROBUST FIX ---
+    if [[ "${#depends[@]}" -gt 0 ]]; then
+        printf "deps:\n"
+        for dep in "${depends[@]}"; do
+            # 1. Skip any dependency marked as a make or check dependency.
+            if [[ "$dep" == *"(make)"* || "$dep" == *"(check)"* ]]; then
+                continue
+            fi
+            # 2. Clean the dependency string:
+            #    - Remove version constraints (>=, <=, etc.)
+            #    - Remove descriptions (: required by...)
+            clean_dep=$(echo "$dep" | sed -e 's/[<>=].*//' -e 's/:.*//')
+            printf "  - %s\n" "$clean_dep"
+        done
+    fi
+    # --- END FIX ---
+
     if [[ "${#conflicts[@]}" -gt 0 ]]; then printf "conflicts:\n"; for conf in "${conflicts[@]}"; do printf "  - %s\n" "$conf"; done; fi
     if [[ "${#replaces[@]}" -gt 0 ]]; then printf "replaces:\n"; for rep in "${replaces[@]}"; do printf "  - %s\n" "$rep"; done; fi
     if [[ "${#provides[@]}" -gt 0 ]]; then printf "provides:\n"; for prov in "${provides[@]}"; do printf "  - %s\n" "$prov"; done; fi

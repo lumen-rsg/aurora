@@ -29,6 +29,7 @@ namespace au {
         // --- Repository Packages Table (the "available" packages) ---
         void sync_repo_packages(const std::vector<Package>& packages);
         std::optional<Package> find_repo_package(const std::string& name) const;
+        std::vector<Package> list_all_repo_packages() const;
 
     private:
         // PIMPL idiom to hide the sqlite_orm implementation details

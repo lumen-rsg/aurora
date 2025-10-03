@@ -276,30 +276,30 @@ namespace au {
     }
 
     std::expected<void, TransactionError> PackageManager::execute_transaction(const Transaction& plan) {
-        log::info("Executing transaction...");
+    log::info("Executing transaction...");
+    std::vector<InstalledPackage> completed_installs;
 
-        std::vector<InstalledPackage> completed_installs;
-        std::vector<std::filesystem::path> created_dirs; // Track created dirs for rollback
+    try {
+        const bool use_chroot = (m_root_path != "/");
 
-        try {
-            const bool use_chroot = (m_root_path != "/");
-
-            // --- STAGE 0: Handle Removals FIRST ---
+        // --- STAGE 0: Removals ---
+        if (!plan.to_remove.empty()) {
+            // Run all pre-remove scripts first.
+            log::progress("Running pre-remove scripts...");
             for (const auto& pkg_to_remove : plan.to_remove) {
                 if (!pkg_to_remove.pre_remove_script.empty()) {
-                    log::info("Running pre-remove script for " + pkg_to_remove.name);
-                    // Pre-remove scripts run BEFORE files are touched. Use the non-chroot helper.
                     if (!run_pre_script(m_root_path / pkg_to_remove.pre_remove_script, m_root_path)) {
-                        log::error("Pre-remove script for " + pkg_to_remove.name + " failed.");
+                        log::error("\nPre-remove script for " + pkg_to_remove.name + " failed.");
                         throw TransactionError::ScriptletFailed;
                     }
                 }
             }
+            log::progress_ok();
 
             // Remove all files.
-            std::set<std::filesystem::path> parent_dirs; // To track for empty dir removal
+            std::set<std::filesystem::path> parent_dirs;
             for (const auto& pkg_to_remove : plan.to_remove) {
-                log::info("Removing files for " + pkg_to_remove.name);
+                log::progress("Removing files for " + pkg_to_remove.name + "...");
                 for (const auto& file : pkg_to_remove.owned_files) {
                     const auto full_path = m_root_path / file;
                     if (std::filesystem::exists(full_path) || std::filesystem::is_symlink(full_path)) {
@@ -310,142 +310,101 @@ namespace au {
                     }
                 }
             }
+            log::progress_ok();
 
             // Commit removals to the database.
+            log::progress("Updating database...");
             for (const auto& pkg_to_remove : plan.to_remove) {
                 m_db.remove_installed_package(pkg_to_remove.name);
             }
+            log::progress_ok();
+        }
 
-            // --- STAGE 1: Pre-install Hooks & Extraction ---
+        // --- STAGE 1: Installations ---
+        if (!plan.to_install.empty()) {
             for (const auto& install_item : plan.to_install) {
                 const auto& pkg = install_item.metadata;
-                log::info("Installing " + pkg.name + " " + pkg.version + "...");
+                log::progress("Installing " + pkg.name + " " + pkg.version + "...");
 
                 const auto staging_path = m_cache_path / "staging" / pkg.name;
                 std::filesystem::remove_all(staging_path);
                 std::filesystem::create_directories(staging_path);
 
-                // 1. Extract the archive to a temporary staging area.
                 auto extract_result = au::archive::extract(install_item.downloaded_archive_path, staging_path);
                 if (!extract_result) {
-                    log::error("Failed to extract archive for " + pkg.name);
+                    log::error("\nFailed to extract archive for " + pkg.name);
                     throw TransactionError::ExtractionFailed;
                 }
 
-                // 2. Run pre-install scriptlet from the staging area.
                 if (!pkg.pre_install_script.empty()) {
-                    log::info("Running pre-install script for " + pkg.name);
-                    // Pre-install scripts run BEFORE files are touched. Use the non-chroot helper.
                     if (!run_pre_script(staging_path / pkg.pre_install_script, m_root_path)) {
-                        log::error("Pre-install script for " + pkg.name + " failed.");
+                        log::error("\nPre-install script for " + pkg.name + " failed.");
                         throw TransactionError::ScriptletFailed;
                     }
                 }
 
-                // 3. Install files from staging to the final root directory, preserving attributes
-                //    and correctly handling filesystem symlinks.
-                for (const auto& file : *extract_result) {
-                    auto source = staging_path / file;
-                    auto dest = m_root_path / file;
+                std::string command = "cp -a " + staging_path.string() + "/. " + m_root_path.string() + "/";
+                int status = std::system(command.c_str());
 
-                    // Use `install -D` to create parent directories and copy the file in one
-                    // symlink-aware operation. We also need to get the permissions from the source file.
-                    // NOTE: This assumes a GNU-compatible `install` command is available in the host.
-
-                    // Get the source file's permissions to pass them to `install`.
-                    auto perms = std::filesystem::status(source).permissions();
-                    int perm_val = static_cast<int>(perms);
-
-                    // We format the permissions into an octal mode string for the -m flag.
-                    std::stringstream ss;
-                    ss << std::oct << (perm_val & 07777); // Mask to get relevant permission bits
-
-                    std::string command = "cp -a " + staging_path.string() + "/. " + m_root_path.string() + "/";
-                    int status = std::system(command.c_str());
-
-                    if (WEXITSTATUS(status) != 0) {
-                        log::error("Failed to copy package payload from staging for " + pkg.name);
-                        throw TransactionError::FileSystemError;
-                    }
-
+                if (WEXITSTATUS(status) != 0) {
+                    log::error("\nFailed to copy package payload from staging for " + pkg.name);
+                    throw TransactionError::FileSystemError;
                 }
 
-                // 4. Clean up the staging directory for this package
                 std::filesystem::remove_all(staging_path);
 
-                // 4. If all steps succeed for this package, prepare its final DB entry.
                 InstalledPackage final_package;
                 static_cast<Package&>(final_package) = pkg;
                 final_package.install_date = get_current_date();
                 final_package.owned_files = *extract_result;
                 completed_installs.push_back(std::move(final_package));
             }
+            log::progress_ok();
 
-            // --- STAGE 2: Commit to Database ---
-            log::info("Committing transaction to database...");
+            // Commit new packages to the database
+            log::progress("Updating database...");
             for (const auto& installed_pkg : completed_installs) {
                 m_db.add_installed_package(installed_pkg);
             }
-
-            // Post-install scripts run AFTER files are in place. Use the chroot-aware helper.
-            for (const auto& installed_pkg : completed_installs) {
-                if (!installed_pkg.post_install_script.empty()) {
-                    log::info("Running post-install script for " + installed_pkg.name);
-                    if (!run_post_script(installed_pkg.post_install_script, use_chroot)) {
-                        log::error("Warning: Post-install script for " + installed_pkg.name + " failed.");
-                    }
-                }
-            }
-            // Post-remove scripts run AFTER files are gone. Use the chroot-aware helper.
-            for (const auto& pkg_to_remove : plan.to_remove) {
-                if (!pkg_to_remove.post_remove_script.empty()) {
-                    log::info("Running post-remove script for " + pkg_to_remove.name);
-                    if (!run_post_script(pkg_to_remove.post_remove_script, use_chroot)) {
-                        log::error("Warning: Post-remove script for " + pkg_to_remove.name + " failed.");
-                    }
-                }
-            }
-
-            // Final cleanup: try to remove now-empty directories.
-            for(auto it = parent_dirs.rbegin(); it != parent_dirs.rend(); ++it) {
-                if (std::filesystem::exists(*it) && std::filesystem::is_empty(*it)) {
-                    std::filesystem::remove(*it);
-                }
-            }
-
-
-        } catch (const TransactionError& err) {
-            // --- ROLLBACK STAGE --- (This is re-thrown at the end)
-            log::error("A transaction error occurred. Rolling back changes...");
-
-            for (auto it = completed_installs.rbegin(); it != completed_installs.rend(); ++it) {
-                log::info("Rolling back files for " + it->name);
-                for (const auto& file_to_remove : it->owned_files) {
-                    std::error_code ec;
-                    std::filesystem::remove(m_root_path / file_to_remove, ec);
-                    if (ec) log::error("Failed to remove file on rollback: " + (m_root_path / file_to_remove).string());
-                }
-            }
-            // Attempt to remove created directories (best-effort)
-            for(auto it = created_dirs.rbegin(); it != created_dirs.rend(); ++it) {
-                if (std::filesystem::is_empty(*it)) {
-                    std::filesystem::remove(*it);
-                }
-            }
-
-            log::ok("Rollback complete.");
-            return std::unexpected(err);
-
-        } catch (std::exception &e) {
-            log::error(e.what());
-            log::error("An unknown exception occurred during installation. Partial rollback may be needed.");
-            // We don't have enough info to do a safe file rollback here.
-            return std::unexpected(TransactionError::FileSystemError);
+            log::progress_ok();
         }
 
-        log::ok("Transaction completed successfully.");
-        return {};
+        // --- STAGE 2: Post-transaction Hooks ---
+        if (!completed_installs.empty() || !plan.to_remove.empty()) {
+            log::progress("Running post-transaction hooks...");
+            for (const auto& installed_pkg : completed_installs) {
+                if (!installed_pkg.post_install_script.empty()) {
+                    if (!run_post_script(installed_pkg.post_install_script, use_chroot)) {
+                        log::error("\nWarning: Post-install script for " + installed_pkg.name + " failed.");
+                    }
+                }
+            }
+            for (const auto& pkg_to_remove : plan.to_remove) {
+                if (!pkg_to_remove.post_remove_script.empty()) {
+                    if (!run_post_script(pkg_to_remove.post_remove_script, use_chroot)) {
+                        log::error("\nWarning: Post-remove script for " + pkg_to_remove.name + " failed.");
+                    }
+                }
+            }
+            log::progress_ok();
+        }
+
+    } catch (const TransactionError& err) {
+        log::error("A transaction error occurred. Rolling back changes...");
+        for (auto it = completed_installs.rbegin(); it != completed_installs.rend(); ++it) {
+            log::info("Rolling back files for " + it->name);
+            for (const auto& file_to_remove : it->owned_files) {
+                std::error_code ec;
+                std::filesystem::remove(m_root_path / file_to_remove, ec);
+            }
+        }
+        log::ok("Rollback complete.");
+        return std::unexpected(err);
     }
+
+    log::ok("Transaction completed successfully.");
+    return {};
+}
 
     // The high-level install function that ties the plan-prepare-execute sequence together
     std::expected<void, TransactionError> PackageManager::install(const std::vector<std::string>& package_names, bool force) {
