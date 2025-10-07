@@ -240,6 +240,44 @@ namespace au {
         return 0; // Versions are identical
     }
 
+    // --- HELPER 1: For PRE-scripts (install & remove) ---
+    // Runs WITHOUT chroot, passing the root dir as an argument.
+    bool PackageManager::run_pre_script(const std::filesystem::path& script_path, const std::filesystem::path& target_root) const {
+        if (script_path.empty() || !std::filesystem::exists(script_path)) {
+            return true;
+        }
+        std::filesystem::permissions(script_path, std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
+
+        // Command: /path/to/script /path/to/target/root
+        std::string command = script_path.string() + " " + target_root.string();
+        log::info("Executing pre-op command: " + command);
+
+        int status = std::system(command.c_str());
+        return WEXITSTATUS(status) == 0;
+    }
+
+    // --- HELPER 2: For POST-scripts (install & remove) ---
+    // Runs WITH chroot for safety, as files are now in a consistent state.
+    bool PackageManager::run_post_script(const std::filesystem::path& script_path_in_root, bool use_chroot) const {
+        const auto script_path_on_host = m_root_path / script_path_in_root;
+        if (script_path_in_root.empty() || !std::filesystem::exists(script_path_on_host)) {
+            return true;
+        }
+        std::filesystem::permissions(script_path_on_host, std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
+
+        std::string command;
+        const std::string script_path_for_exec = "/" + script_path_in_root.string();
+        if (use_chroot) {
+            command = "chroot " + m_root_path.string() + " " + script_path_for_exec;
+        } else {
+            command = script_path_on_host.string();
+        }
+
+        log::info("Executing post-op command: " + command);
+        int status = std::system(command.c_str());
+        return WEXITSTATUS(status) == 0;
+    }
+
     // Helper to get the current date as a string`
     std::string get_current_date() {
         const auto now = std::chrono::system_clock::now();
@@ -441,16 +479,14 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
         }
         log::progress_ok();
 
-        log::progress("Running pre-remove scripts...");
+        log::progress("Preparing post-remove scripts...");
         for (const auto& pkg_to_remove : plan.to_remove) {
-            if (!pkg_to_remove.pre_remove_script.empty()) {
-                const auto script_path = m_root_path / pkg_to_remove.pre_remove_script;
-                if (std::filesystem::exists(script_path)) {
-                    if (!m_lua_sandbox.run_script_from_file(script_path, m_root_path)) {
-                        std::string msg = "Pre-remove script for " + pkg_to_remove.name + " failed.";
-                        log::error("\n" + msg);
-                        throw TransactionException(TransactionError::ScriptletFailed, msg);
-                    }
+            if (!pkg_to_remove.post_remove_script.empty()) {
+                const auto script_path_in_root = m_root_path / pkg_to_remove.post_remove_script;
+                if (std::filesystem::exists(script_path_in_root)) {
+                    const auto temp_script_path = tx_workspace / (pkg_to_remove.name + "-post-remove");
+                    std::filesystem::copy(script_path_in_root, temp_script_path);
+                    post_remove_scripts[pkg_to_remove.name] = temp_script_path;
                 }
             }
         }
@@ -477,9 +513,10 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
             // This runs before the package's files are on the live system.
             if (!pkg.pre_install_script.empty()) {
                 const auto script_path_in_stage = staging_path / pkg.pre_install_script;
-                if (!m_lua_sandbox.run_script_from_file(script_path_in_stage, m_root_path)) {
-                    log::error("\nPre-install script for " + pkg.name + " failed.");
-                    throw TransactionException(TransactionError::ScriptletFailed, "Pre-install script failed.");
+                if (!run_pre_script(script_path_in_stage, m_root_path)) {
+                    std::string msg = "Pre-install script for " + pkg.name + " failed.";
+                    log::error("\n" + msg);
+                    throw TransactionException(TransactionError::ScriptletFailed, msg);
                 }
             }
 
@@ -536,12 +573,10 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
         // 1. Run post-install scripts for newly installed packages.
         for (const auto& installed_pkg : completed_installs) {
             if (!installed_pkg.post_install_script.empty()) {
-                const auto script_path = m_root_path / installed_pkg.post_install_script;
-                if (std::filesystem::exists(script_path)) {
-                    if (!m_lua_sandbox.run_script_from_file(script_path, m_root_path)) {
-                        // Log as a warning, but do not throw. The package is installed.
-                        log::warn("\nPost-install script for " + installed_pkg.name + " failed.");
-                    }
+                // The script is now at its final location within the root.
+                if (!run_post_script(installed_pkg.post_install_script, use_chroot)) {
+                    // Log as a warning, but do not throw. The package is installed.
+                    log::error("\nWarning: Post-install script for " + installed_pkg.name + " failed.");
                 }
             }
         }
@@ -549,16 +584,18 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
         // 2. Run post-remove scripts for removed packages.
         for (const auto& pkg_to_remove : plan.to_remove) {
             if (!pkg_to_remove.post_remove_script.empty()) {
-                // The script file no longer exists on the root filesystem; it's in our backup.
-                const auto script_path = tx_backup_dir / pkg_to_remove.post_remove_script;
-                if (std::filesystem::exists(script_path)) {
-                    if (!m_lua_sandbox.run_script_from_file(script_path, m_root_path)) {
-                        log::warn("\nPost-remove script for " + pkg_to_remove.name + " failed.");
+                auto it = post_remove_scripts.find(pkg_to_remove.name);
+                if (it != post_remove_scripts.end()) {
+                    // We run the temporary copy of the script we made earlier.
+                    // Since it's not in the root, we must run it WITHOUT chroot.
+                    // We pass the root as an argument, similar to pre-scripts.
+                    if (!run_pre_script(it->second, m_root_path)) {
+                        log::error("\nWarning: Post-remove script for " + pkg_to_remove.name + " failed.");
                     }
                 }
             }
         }
-        log::progress_ok(); // Finish the progress line for all hooks
+        log::progress_ok();
 
 
     } catch (const TransactionException& e) {

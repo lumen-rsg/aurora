@@ -25,8 +25,6 @@
 #include <filesystem>
 #include <map>
 
-#include "lua_sandbox.h"
-
 namespace au {
 
     enum class TransactionError {
@@ -113,6 +111,8 @@ namespace au {
         RepositoryManager m_repo_manager;
         DependencyResolver m_resolver;
         bool is_dependency_satisfied(const std::string& dep_name) const;
+        bool run_pre_script(const std::filesystem::path& script_path, const std::filesystem::path& target_root) const;
+        bool run_post_script(const std::filesystem::path& script_path_in_root, bool use_chroot) const;
 
         int compare_versions(const std::string& v1, const std::string& v2) const;
 
@@ -122,7 +122,6 @@ namespace au {
         };
 
         void rollback_transaction(const FileSystemJournal& journal, const std::filesystem::path& tx_workspace);
-        LuaSandbox m_lua_sandbox;
     };
 
 } // namespace au
