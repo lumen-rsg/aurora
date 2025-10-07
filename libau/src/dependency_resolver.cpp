@@ -65,88 +65,86 @@ std::expected<void, ResolveError> DependencyResolver::dfs_visit(
     std::set<std::string>& visiting,
     std::set<std::string>& visited)
 {
-    // --- STEP 1: Find the provider package for this dependency ---
-    // This is now the FIRST thing we do.
-
-    // A. Check if the dependency is satisfied by a package we've already processed.
-    if (visited.count(dep_name)) {
-        return {};
-    }
-
-    std::optional<Package> provider_pkg_opt;
-
-    // B. Check if it's satisfied by a package that's already in our final install list.
+    // --- STEP 1: Check if this dependency is already satisfied ---
+    // (This part of the logic remains the same)
+    if (visited.count(dep_name)) { return {}; }
     for (const auto& pkg : sorted_list) {
-        if (pkg.name == dep_name) { return {}; } // The package itself is already planned
+        if (pkg.name == dep_name) { return {}; }
         for (const auto& provision : pkg.provides) {
-            // A simple version check is sufficient here
-            if (provision.rfind(dep_name, 0) == 0) { return {}; }
+            if (provision == dep_name) { return {}; }
         }
     }
-
-    // C. Check against already-installed packages on the system.
     for (const auto& installed_pkg : m_db.list_installed_packages()) {
         if (installed_pkg.name == dep_name) { return {}; }
         for (const auto& provision : installed_pkg.provides) {
-            if (provision.rfind(dep_name, 0) == 0) { return {}; }
+            if (provision == dep_name) { return {}; }
         }
     }
 
-    // D. If not satisfied, find a provider in the repositories.
-    provider_pkg_opt = m_db.find_repo_package(dep_name);
-    if (!provider_pkg_opt) {
-        log::progress("Searching for provider of '" + dep_name + "'...");
-        for (const auto& repo_pkg : m_db.list_all_repo_packages()) {
-            for (const auto& provision : repo_pkg.provides) {
-                if (provision.rfind(dep_name, 0) == 0) {
-                    provider_pkg_opt = repo_pkg;
-                    goto found_provider;
-                }
+    // --- STEP 2: Find ALL potential providers for this dependency ---
+    std::optional<Package> real_package_provider;
+    std::vector<Package> virtual_providers;
+
+    // We now search the entire repository list to gather all candidates.
+    for (const auto& repo_pkg : m_db.list_all_repo_packages()) {
+        // Rule 1: Does this package have the exact name? This is our highest priority.
+        if (repo_pkg.name == dep_name) {
+            real_package_provider = repo_pkg;
+            continue; // Keep searching for virtual providers for ambiguity check
+        }
+        // Rule 2: Does this package provide the dependency?
+        for (const auto& provision : repo_pkg.provides) {
+            if (provision == dep_name) {
+                virtual_providers.push_back(repo_pkg);
+                break;
             }
         }
-        found_provider:;
     }
 
-    if (!provider_pkg_opt) {
-        log::error("Could not satisfy dependency: '" + dep_name + "'");
+    // --- STEP 3: Select the BEST provider based on our rules ---
+    std::optional<Package> provider_pkg_opt;
+    if (real_package_provider) {
+        // We found a package with the exact name. This is our preferred choice.
+        provider_pkg_opt = real_package_provider;
+        log::progress("Resolved dependency '" + dep_name + "' to real package '" + provider_pkg_opt->name + "'");
+    } else if (virtual_providers.size() == 1) {
+        // No real package, but exactly one virtual provider. This is also a clear choice.
+        provider_pkg_opt = virtual_providers.front();
+        log::progress("Resolved dependency '" + dep_name + "' to virtual provider '" + provider_pkg_opt->name + "'");
+    } else if (virtual_providers.empty()) {
+        // No real package and no virtual providers found.
+        log::error("Could not satisfy dependency: '" + dep_name + "'. No package found.");
         return std::unexpected(ResolveError::DependencyNotFound);
+    } else {
+        // No real package, but MULTIPLE virtual providers. This is an ambiguity error.
+        std::string provider_list;
+        for(const auto& p : virtual_providers) { provider_list += p.name + " "; }
+        log::error("Ambiguous dependency: '" + dep_name + "' is provided by multiple packages: " + provider_list);
+        log::error("Please install one of the providers explicitly.");
+        return std::unexpected(ResolveError::AmbiguousProvider);
     }
 
+    // --- STEP 4: Perform Cycle Check and Recurse (using the selected provider) ---
+    // (The rest of the function proceeds as before, using the now-unambiguous provider_pkg)
     const Package& provider_pkg = *provider_pkg_opt;
-    log::progress("Resolved dependency '" + dep_name + "' to provider package '" + provider_pkg.name + "'");
 
-    // --- STEP 2: Perform Cycle Check and Recurse ---
-    // We now operate ONLY on the provider package's name.
-
-    // If we have already fully processed this provider, we're done.
-    if (visited.count(provider_pkg.name)) {
-        return {};
-    }
-    // If we are currently in the process of visiting this provider, we've found a cycle.
+    if (visited.count(provider_pkg.name)) { return {}; }
     if (visiting.count(provider_pkg.name)) {
         log::error("Circular dependency detected involving package: " + provider_pkg.name);
         return std::unexpected(ResolveError::CircularDependency);
     }
 
-    // Mark the PROVIDER as being visited.
     visiting.insert(provider_pkg.name);
-
-    // Recurse on the provider's dependencies.
     for (const auto& next_dep_name : provider_pkg.deps) {
         auto result = dfs_visit(next_dep_name, sorted_list, visiting, visited);
         if (!result) {
-            // Propagate the error up the call stack.
             visiting.erase(provider_pkg.name);
             return result;
         }
     }
 
-    // --- STEP 3: Finalize this Node ---
-    // All dependencies for this provider are met. Move it from "visiting" to "visited".
     visiting.erase(provider_pkg.name);
     visited.insert(provider_pkg.name);
-
-    // Add the provider package to our final, sorted list.
     sorted_list.push_back(provider_pkg);
 
     return {};

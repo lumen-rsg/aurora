@@ -19,7 +19,8 @@ namespace au {
         PackageNotFound,
         DependencyNotFound,
         CircularDependency,
-        ConflictDetected
+        ConflictDetected,
+        AmbiguousProvider
     };
 
     using ResolutionList = std::vector<Package>;
@@ -39,7 +40,6 @@ namespace au {
         );
 
         const Database& m_db;
-        // const RepositoryManager& m_repo_manager; // We will add this back later.
     };
 
 } // namespace au
