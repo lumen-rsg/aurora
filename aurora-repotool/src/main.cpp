@@ -80,7 +80,7 @@ int cmd_add(const std::filesystem::path& repo_dir, const std::filesystem::path& 
     }
 
     // 1. Extract metadata from the package to be added.
-    auto meta_content = au::archive::extract_single_file_to_memory(package_file, ".AURORA_META");
+    auto meta_content = au::extract_single_file_to_memory(package_file, ".AURORA_META");
     if (!meta_content) return 1;
     auto parse_result = au::Parser::parse_from_string(*meta_content);
     if (!parse_result) return 1;

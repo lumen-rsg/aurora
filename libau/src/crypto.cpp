@@ -8,6 +8,7 @@
 #include <expected>
 #include <fstream>
 #include <gpgme.h>
+#include <iterator>
 
 namespace au {
 
@@ -23,8 +24,14 @@ namespace au {
             return false;
         }
 
-        // Use the picosha2 library to compute the hash
-        std::string computed_hash = picosha2::hash256_hex_string(file);
+        // --- CORRECTED HASHING LOGIC ---
+        // Instead of passing the stream object directly, we pass iterators that
+        // represent the beginning and end of the stream's content. This is unambiguous.
+        std::string computed_hash = picosha2::hash256_hex_string(
+            std::istreambuf_iterator<char>(file),
+            std::istreambuf_iterator<char>()
+        );
+        // --- END CORRECTION ---
 
         if (computed_hash != expected_checksum) {
             log::error("Checksum mismatch for: " + file_path.filename().string());
@@ -94,7 +101,7 @@ bool verify_repository_signature(const std::filesystem::path& data_file, const s
     // that is in our trusted keyring (summary == GREEN).
     bool trusted_signature_found = false;
     for (gpgme_signature_t sig = result->signatures; sig; sig = sig->next) {
-        if ((sig->summary & GPGME_SIG_SUMMARY_VALID) && (sig->summary & GPGME_SIG_SUMMARY_GREEN)) {
+        if ((sig->summary & GPGME_SIGSUM_VALID) && (sig->summary & GPGME_SIGSUM_GREEN)) {
             log::info("Found valid, trusted signature from: " + std::string(sig->fpr));
             trusted_signature_found = true;
             break;

@@ -15,7 +15,8 @@ namespace au {
 // Represents a single download task and its live progress.
     struct DownloadJob {
         // --- Inputs ---
-        std::string url;
+
+        std::vector<std::string> urls;
         std::filesystem::path destination_path;
         std::string name_for_display;
 
@@ -28,8 +29,8 @@ namespace au {
 
         // An explicit constructor to initialize the public "input" members.
         // We use std::move to be efficient with the string arguments.
-        DownloadJob(std::string u, std::filesystem::path d, std::string n)
-                : url(std::move(u)),
+        DownloadJob(std::vector<std::string> u, std::filesystem::path d, std::string n)
+                : urls(std::move(u)),
                   destination_path(std::move(d)),
                   name_for_display(std::move(n))
         {}
@@ -49,6 +50,8 @@ namespace au {
         // Downloads all jobs in parallel and updates their state in-place.
         // Returns true if ALL downloads succeeded, false otherwise.
         bool download_all(std::vector<DownloadJob>& jobs);
+
+        int64_t get_total_download_size(const std::vector<DownloadJob> &jobs);
 
     private:
         struct Impl;

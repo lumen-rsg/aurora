@@ -125,6 +125,13 @@ namespace au {
     return true;
 }
 
+    static void log_space_error(const std::string& path, int64_t required, int64_t available) {
+        auto to_mb = [](int64_t bytes) { return bytes / (1024 * 1024); };
+        log::error("Not enough free space on " + path);
+        log::error("  Required: " + std::to_string(to_mb(required)) + " MB");
+        log::error("  Available: " + std::to_string(to_mb(available)) + " MB");
+    }
+
     // Implement the previously stubbed method
     std::expected<void, TransactionError> PackageManager::prepare_transaction_assets(Transaction& transaction) {
         if (transaction.to_install.empty()) {
@@ -145,16 +152,22 @@ namespace au {
         for (const auto& item : transaction.to_install) {
             const auto& pkg = item.metadata;
 
-            auto repo_url_opt = m_repo_manager.get_repo_url(pkg.repo_name);
-            if (!repo_url_opt) {
+            // NEW: Get the list of mirrors
+            auto repo_urls_opt = m_repo_manager.get_repo_urls(pkg.repo_name);
+            if (!repo_urls_opt) {
                 log::error("Cannot find repository URL for repo '" + pkg.repo_name + "'.");
                 return std::unexpected(TransactionError::ResolutionFailed);
             }
 
-            std::string url = *repo_url_opt + "/" + pkg.name + "-" + pkg.version + ".au";
+            // Construct a list of full download URLs from the mirrors
+            std::vector<std::string> download_urls;
+            for (const auto& base_url : *repo_urls_opt) {
+                download_urls.push_back(base_url + "/" + pkg.name + "-" + pkg.version + ".au");
+            }
+
             download_paths.push_back(m_cache_path / (pkg.name + "-" + pkg.version + ".au"));
             jobs->emplace_back(
-                    url,
+                    std::move(download_urls), // Pass the whole list
                     download_paths.back(),
                     pkg.name + "-" + pkg.version
             );
@@ -225,44 +238,6 @@ namespace au {
         }
 
         return 0; // Versions are identical
-    }
-
-    // --- HELPER 1: For PRE-scripts (install & remove) ---
-    // Runs WITHOUT chroot, passing the root dir as an argument.
-    bool PackageManager::run_pre_script(const std::filesystem::path& script_path, const std::filesystem::path& target_root) const {
-        if (script_path.empty() || !std::filesystem::exists(script_path)) {
-            return true;
-        }
-        std::filesystem::permissions(script_path, std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
-
-        // Command: /path/to/script /path/to/target/root
-        std::string command = script_path.string() + " " + target_root.string();
-        log::info("Executing pre-op command: " + command);
-
-        int status = std::system(command.c_str());
-        return WEXITSTATUS(status) == 0;
-    }
-
-    // --- HELPER 2: For POST-scripts (install & remove) ---
-    // Runs WITH chroot for safety, as files are now in a consistent state.
-    bool PackageManager::run_post_script(const std::filesystem::path& script_path_in_root, bool use_chroot) const {
-        const auto script_path_on_host = m_root_path / script_path_in_root;
-        if (script_path_in_root.empty() || !std::filesystem::exists(script_path_on_host)) {
-            return true;
-        }
-        std::filesystem::permissions(script_path_on_host, std::filesystem::perms::owner_exec, std::filesystem::perm_options::add);
-
-        std::string command;
-        const std::string script_path_for_exec = "/" + script_path_in_root.string();
-        if (use_chroot) {
-            command = "chroot " + m_root_path.string() + " " + script_path_for_exec;
-        } else {
-            command = script_path_on_host.string();
-        }
-
-        log::info("Executing post-op command: " + command);
-        int status = std::system(command.c_str());
-        return WEXITSTATUS(status) == 0;
     }
 
     // Helper to get the current date as a string`
@@ -466,14 +441,16 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
         }
         log::progress_ok();
 
-        log::progress("Preparing post-remove scripts...");
+        log::progress("Running pre-remove scripts...");
         for (const auto& pkg_to_remove : plan.to_remove) {
-            if (!pkg_to_remove.post_remove_script.empty()) {
-                const auto script_path_in_root = m_root_path / pkg_to_remove.post_remove_script;
-                if (std::filesystem::exists(script_path_in_root)) {
-                    const auto temp_script_path = tx_workspace / (pkg_to_remove.name + "-post-remove");
-                    std::filesystem::copy(script_path_in_root, temp_script_path);
-                    post_remove_scripts[pkg_to_remove.name] = temp_script_path;
+            if (!pkg_to_remove.pre_remove_script.empty()) {
+                const auto script_path = m_root_path / pkg_to_remove.pre_remove_script;
+                if (std::filesystem::exists(script_path)) {
+                    if (!m_lua_sandbox.run_script_from_file(script_path, m_root_path)) {
+                        std::string msg = "Pre-remove script for " + pkg_to_remove.name + " failed.";
+                        log::error("\n" + msg);
+                        throw TransactionException(TransactionError::ScriptletFailed, msg);
+                    }
                 }
             }
         }
@@ -500,10 +477,9 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
             // This runs before the package's files are on the live system.
             if (!pkg.pre_install_script.empty()) {
                 const auto script_path_in_stage = staging_path / pkg.pre_install_script;
-                if (!run_pre_script(script_path_in_stage, m_root_path)) {
-                    std::string msg = "Pre-install script for " + pkg.name + " failed.";
-                    log::error("\n" + msg);
-                    throw TransactionException(TransactionError::ScriptletFailed, msg);
+                if (!m_lua_sandbox.run_script_from_file(script_path_in_stage, m_root_path)) {
+                    log::error("\nPre-install script for " + pkg.name + " failed.");
+                    throw TransactionException(TransactionError::ScriptletFailed, "Pre-install script failed.");
                 }
             }
 
@@ -515,8 +491,6 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
                 if (std::filesystem::exists(dest_path)) {
                     std::string msg = "\nFile conflict during execution: " + dest_path.string();
                     log::error("\n" + msg);
-                    // OLD: throw TransactionError::FileSystemError;
-                    // NEW:
                     throw TransactionException(TransactionError::FileConflict, msg);
                 }
 
@@ -562,10 +536,12 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
         // 1. Run post-install scripts for newly installed packages.
         for (const auto& installed_pkg : completed_installs) {
             if (!installed_pkg.post_install_script.empty()) {
-                // The script is now at its final location within the root.
-                if (!run_post_script(installed_pkg.post_install_script, use_chroot)) {
-                    // Log as a warning, but do not throw. The package is installed.
-                    log::error("\nWarning: Post-install script for " + installed_pkg.name + " failed.");
+                const auto script_path = m_root_path / installed_pkg.post_install_script;
+                if (std::filesystem::exists(script_path)) {
+                    if (!m_lua_sandbox.run_script_from_file(script_path, m_root_path)) {
+                        // Log as a warning, but do not throw. The package is installed.
+                        log::warn("\nPost-install script for " + installed_pkg.name + " failed.");
+                    }
                 }
             }
         }
@@ -573,18 +549,16 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
         // 2. Run post-remove scripts for removed packages.
         for (const auto& pkg_to_remove : plan.to_remove) {
             if (!pkg_to_remove.post_remove_script.empty()) {
-                auto it = post_remove_scripts.find(pkg_to_remove.name);
-                if (it != post_remove_scripts.end()) {
-                    // We run the temporary copy of the script we made earlier.
-                    // Since it's not in the root, we must run it WITHOUT chroot.
-                    // We pass the root as an argument, similar to pre-scripts.
-                    if (!run_pre_script(it->second, m_root_path)) {
-                        log::error("\nWarning: Post-remove script for " + pkg_to_remove.name + " failed.");
+                // The script file no longer exists on the root filesystem; it's in our backup.
+                const auto script_path = tx_backup_dir / pkg_to_remove.post_remove_script;
+                if (std::filesystem::exists(script_path)) {
+                    if (!m_lua_sandbox.run_script_from_file(script_path, m_root_path)) {
+                        log::warn("\nPost-remove script for " + pkg_to_remove.name + " failed.");
                     }
                 }
             }
         }
-        log::progress_ok();
+        log::progress_ok(); // Finish the progress line for all hooks
 
 
     } catch (const TransactionException& e) {
@@ -626,13 +600,49 @@ std::expected<void, TransactionError> PackageManager::execute_transaction(const 
             return {};
         }
 
+        log::info("Checking available disk space...");
+
+        // A. Calculate installation size delta
+        int64_t install_delta = 0;
+        for(const auto& item : plan.to_install) {
+            install_delta += item.metadata.installed_size;
+        }
+        for(const auto& pkg : plan.to_remove) {
+            // CORRECTED LINE: Access installed_size directly on the InstalledPackage object.
+            install_delta -= pkg.installed_size;
+        }
+
+        // B. Get download size dynamically
+        Downloader downloader; // We need an instance to call the method
+        std::vector<DownloadJob> jobs;
+        for(const auto& pkg : plan.to_install) {
+            auto urls_opt = m_repo_manager.get_repo_urls(pkg.metadata.repo_name);
+            if(urls_opt) jobs.emplace_back(*urls_opt, std::filesystem::path{}, "");
+        }
+        int64_t download_size = downloader.get_total_download_size(jobs);
+
+        // C. Perform checks
+        std::error_code ec;
+        auto cache_space = std::filesystem::space(m_cache_path, ec);
+        if (!ec && download_size > 0 && cache_space.available < static_cast<uint64_t>(download_size)) {
+            log_space_error(m_cache_path.string(), download_size, cache_space.available);
+            return std::unexpected(TransactionError::NotEnoughSpace);
+        }
+
+        auto root_space = std::filesystem::space(m_root_path, ec);
+        if (!ec && install_delta > 0 && root_space.available < static_cast<uint64_t>(install_delta)) {
+            log_space_error(m_root_path.string(), install_delta, root_space.available);
+            return std::unexpected(TransactionError::NotEnoughSpace);
+        }
+        log::ok("Disk space check passed.");
+
         auto prepare_result = prepare_transaction_assets(plan);
         if (!prepare_result) {
             return std::unexpected(prepare_result.error());
         }
 
-            // 3. Execute
-            return execute_transaction(plan);
+        // 3. Execute
+        return execute_transaction(plan);
 
     }
 

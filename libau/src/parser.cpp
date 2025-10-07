@@ -55,6 +55,10 @@ namespace au {
             pkg.description = node["description"].as<std::string>();
         }
 
+        if (node["installed_size"] && node["installed_size"].IsScalar()) {
+            pkg.installed_size = node["installed_size"].as<int64_t>();
+        }
+
         pkg.deps = get_optional_sequence(node, "deps");
         pkg.makedepends = get_optional_sequence(node, "makedepends");
 

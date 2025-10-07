@@ -8,11 +8,18 @@
 #include <string>
 #include <source_location> // C++20, but essential for good logging
 
+#include "ui.h"
+
 namespace au::log {
 
     // Helper function to format the output consistently
     inline void print(const std::string& level, const std::string& color_code, const std::string& msg) {
-        std::cout << color_code << "[  " << level << "  ] > " << "\033[0m" << msg << std::endl;
+        if (au::ui::is_interactive()) {
+            std::cout << color_code << "[  " << level << "  ] > " << "\033[0m" << msg << std::endl;
+        } else {
+            // Non-interactive: print clean text
+            std::cout << "[" << level << "] > " << msg << std::endl;
+        }
     }
 
     inline void ok(const std::string& msg) {
@@ -35,17 +42,27 @@ namespace au::log {
     // Prints a progress message without a newline, and flushes the output.
     // This is for showing what is currently happening.
     inline void progress(const std::string& msg) {
-        // \r: Carriage return (moves cursor to the beginning of the line)
-        // \033[K: Erase from the cursor to the end of the line
-        std::cout << "\r\033[K"
-                  << "\033[1;34m" << "[..] > " << "\033[0m" // Blue header
-                  << msg << std::flush;
+        if (au::ui::is_interactive()) {
+            // Interactive: Use carriage return and erase line for a dynamic feel.
+            std::cout << "\r\033[K"
+                      << "\033[1;34m" << "[..] > " << "\033[0m" // Blue header
+                      << msg << std::flush;
+        } else {
+            // Non-interactive: Print a simple, persistent status message.
+            std::cout << "[..] > " << msg << "..." << std::flush;
+        }
     }
 
     // Prints a green "[OK]" message and finally moves to the next line.
     // This is for showing that a series of progress steps has completed.
     inline void progress_ok() {
-        std::cout << " [" << "\033[1;32m" << "  OKY  " << "\033[0m" << "]" << std::endl;
+        if (au::ui::is_interactive()) {
+            // Interactive: Complete the dynamic line with a fancy OK.
+            std::cout << " [" << "\033[1;32m" << "  OKY  " << "\033[0m" << "]" << std::endl;
+        } else {
+            // Non-interactive: Simply finish the line with a standard OK.
+            std::cout << " OK." << std::endl;
+        }
     }
 
 } // namespace au::log

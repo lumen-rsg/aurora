@@ -26,6 +26,7 @@ namespace au {
         // Finds a package by name across all configured repositories.
         std::optional<Package> find_package(const std::string& package_name) const;
         std::optional<std::string> get_repo_url(const std::string& repo_name) const; // NEW
+        std::optional<std::vector<std::string>> get_repo_urls(const std::string &repo_name) const;
 
     private:
         struct Impl;

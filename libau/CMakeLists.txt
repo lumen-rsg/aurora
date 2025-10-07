@@ -1,19 +1,3 @@
-# --- libau/CMakeLists.txt ---
-
-cmake_minimum_required(VERSION 3.22)
-
-# 1. Define the entire project ONE TIME.
-project(aurora LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# 3. Find all dependencies for all components in ONE place.
-find_package(SQLite3 REQUIRED)
-find_package(yaml-cpp REQUIRED)
-find_package(CURL REQUIRED)
-PKG_CHECK_MODULES(Gpgme REQUIRED)
-
 # Define the library target.
 add_library(au STATIC
         src/archive.cpp
@@ -23,28 +7,49 @@ add_library(au STATIC
         src/package_manager.cpp
         src/parser.cpp
         src/repository.cpp
+        src/crypto.cpp
 )
 
-target_include_directories(au PRIVATE
+# --- CORRECTED AND CONSOLIDATED USAGE REQUIREMENTS ---
+
+# This single block defines all usage requirements for the 'au' target.
+target_include_directories(au
+        # PRIVATE: The implementation files of 'au' need access to their own headers.
+        PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_SOURCE_DIR}/vendor"
+
+        # PUBLIC: System dependencies are needed by both 'au' and its consumers.
+        # These are absolute system paths, which is fine.
+        PUBLIC
+        ${GPGME_INCLUDE_DIRS}
+
+        # INTERFACE: This is what consumers of 'au' (like aurora-cli) need.
+        INTERFACE
+        # For consumers inside this project build, give them the absolute source path.
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+
+        # For consumers after this library is installed, tell them the headers
+        # will be in a relative 'include' directory.
+        $<INSTALL_INTERFACE:include>
 )
 
-# Link this target to its dependencies.
 target_link_libraries(au
+        # PUBLIC: All of these libraries are required by the implementation of 'au'
+        # and transitively by any executable that links to 'au'.
         PUBLIC
         SQLite::SQLite3
-        PRIVATE
         yaml-cpp::yaml-cpp
         CURL::libcurl
-        gpgme
+        LibArchive::LibArchive
+        ${GPGME_LIBRARIES}
+        acl
+        lua
 )
 
-# Installation rules remain the same.
+# --- Installation rules remain the same ---
 install(TARGETS au
         EXPORT au-targets
         ARCHIVE DESTINATION lib
-        LIBRARY DESTINATION lib
 )
 install(DIRECTORY include/
         DESTINATION include

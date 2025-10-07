@@ -32,6 +32,7 @@ namespace au {
         std::string post_remove_script;
         std::string repo_name;
         std::string checksum;
+        int64_t installed_size = 0;
 
         // --- File Manifest ---
         std::vector<std::filesystem::path> files; // NEW: The list of files this package contains.

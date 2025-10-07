@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <unistd.h> // For geteuid()
+#include <functional> // For std::function
 
 // Our library and UI helpers
 #include "ui_helpers.h"
@@ -12,19 +13,23 @@ void print_usage() {
     std::cerr << "Usage: aurora [options] <command> [args...]\n\n"
               << "Options:\n"
               << "  --bootstrap <dir>   Operate on a different system root\n"
-              << "  --force             Bypass safety checks\n\n"
+              << "  --force             Bypass safety checks\n"
+              // REFINED: Add the new flag to the help text
+              << "  --skip-crypto       Skip GPG and checksum verification (DANGEROUS)\n\n"
               << "Commands:\n"
               << "  sync                Synchronize package databases\n"
               << "  install <pkg>...    Install packages from repository\n"
-              << "  install-local <file.au>...  Install local package files\n" // NEW
+              << "  install-local <file.au>...  Install local package files\n"
               << "  remove <pkg>...     Remove packages\n"
               << "  update              Update the entire system\n";
 }
 
-// Translates a TransactionError into a user-friendly string.
+// REFINED: Updated error mapping
 std::string error_to_string(au::TransactionError err) {
     switch (err) {
         case au::TransactionError::ResolutionFailed: return "Could not resolve dependencies.";
+        // New, more specific resolver error
+        case au::TransactionError::AmbiguousProvider: return "Dependency is provided by multiple packages; please be more specific.";
         case au::TransactionError::DownloadFailed: return "A package download failed.";
         case au::TransactionError::ChecksumMismatch: return "A package failed checksum verification.";
         case au::TransactionError::PackageAlreadyInstalled: return "One or more packages are already installed.";
@@ -33,24 +38,57 @@ std::string error_to_string(au::TransactionError err) {
         case au::TransactionError::ExtractionFailed: return "Failed to extract a package archive.";
         case au::TransactionError::ScriptletFailed: return "A package scriptlet failed to execute.";
         case au::TransactionError::FileSystemError: return "A filesystem error occurred.";
+        // New, more specific filesystem error
+        case au::TransactionError::NotEnoughSpace: return "Not enough free disk space to complete the operation.";
         case au::TransactionError::DependencyViolation: return "A dependency violation was detected.";
         case au::TransactionError::ConflictDetected: return "A package conflict was detected.";
         default: return "An unknown transaction error occurred.";
     }
 }
 
-// --- COMMAND HANDLERS ---
+// REFINED: A generic helper to handle the Plan->Confirm->Execute pattern
+int handle_transaction(
+    const std::string& action_name,
+    std::function<std::expected<au::Transaction, au::TransactionError>()> plan_func,
+    std::function<std::expected<void, au::TransactionError>()> exec_func
+) {
+    auto plan_result = plan_func();
+    if (!plan_result) {
+        ui::error(error_to_string(plan_result.error()) + " (see details above)");
+        return 1;
+    }
+
+    au::Transaction plan = std::move(*plan_result);
+    if (plan.is_empty()) {
+        ui::header("Nothing to do.");
+        return 0;
+    }
+
+    ui::print_transaction_summary(plan);
+    if (!ui::confirm("Proceed with " + action_name + "?")) {
+        ui::warning(action_name + " aborted by user.");
+        return 0;
+    }
+
+    auto exec_result = exec_func();
+    if (exec_result) {
+        ui::header(action_name + " completed successfully.");
+        return 0;
+    }
+
+    ui::error(error_to_string(exec_result.error()) + " (see details above)");
+    return 1;
+}
+
+
+// --- COMMAND HANDLERS (Now much simpler!) ---
 
 int do_install_local(au::PackageManager& pm, const std::vector<std::string>& files, bool force) {
     ui::action("Installing local package files...");
     if (force) ui::warning("Forcing operation, safety checks are disabled!");
 
     for (const auto& file_path_str : files) {
-        // --- THIS IS THE FIX ---
-        // Convert the user-provided path (which may be relative) to a
-        // canonical, absolute path before passing it to the library.
         std::filesystem::path absolute_path = std::filesystem::absolute(file_path_str);
-        // --- END FIX ---
 
         if (!std::filesystem::exists(absolute_path)) {
             ui::error("File not found: " + absolute_path.string());
@@ -58,7 +96,6 @@ int do_install_local(au::PackageManager& pm, const std::vector<std::string>& fil
         }
 
         ui::header("Processing: " + absolute_path.string());
-        // Pass the absolute path to the library
         auto result = pm.install_local_package(absolute_path, force);
         if (!result) {
             ui::error("Failed to install '" + absolute_path.string() + "': " + error_to_string(result.error()));
@@ -84,87 +121,33 @@ int do_update(au::PackageManager& pm, bool force) {
     ui::action("Starting system update...");
     if (force) ui::warning("Forcing operation, safety checks are disabled!");
 
-    auto plan_result = pm.plan_update_transaction(force);
-    if (!plan_result) {
-        ui::error(error_to_string(plan_result.error()));
-        return 1;
-    }
-    au::Transaction plan = std::move(*plan_result);
-    if (plan.is_empty()) {
-        ui::header("System is already up to date.");
-        return 0;
-    }
-    ui::print_transaction_summary(plan);
-    if (!ui::confirm("Proceed with update?")) {
-        ui::warning("Update aborted by user.");
-        return 0;
-    }
-
-    auto update_result = pm.update_system(force);
-    if (update_result) {
-        ui::header("System update completed successfully.");
-        return 0;
-    }
-    ui::error(error_to_string(update_result.error()));
-    return 1;
+    return handle_transaction(
+        "update",
+        [&]() { return pm.plan_update_transaction(force); },
+        [&]() { return pm.update_system(force); }
+    );
 }
 
 int do_install(au::PackageManager& pm, const std::vector<std::string>& packages, bool force) {
     ui::action("Resolving dependencies...");
     if (force) ui::warning("Forcing operation, safety checks are disabled!");
 
-    auto plan_result = pm.plan_install_transaction(packages, force);
-    if (!plan_result) {
-        ui::error(error_to_string(plan_result.error()));
-        return 1;
-    }
-    au::Transaction plan = std::move(*plan_result);
-    if (plan.is_empty()) {
-        ui::warning("Nothing to do.");
-        return 0;
-    }
-    ui::print_transaction_summary(plan);
-    if (!ui::confirm("Proceed with installation?")) {
-        ui::warning("Installation aborted by user.");
-        return 0;
-    }
-
-    auto install_result = pm.install(packages, force);
-    if (install_result) {
-        ui::header("Installation completed successfully.");
-        return 0;
-    }
-    ui::error(error_to_string(install_result.error()));
-    return 1;
+    return handle_transaction(
+        "installation",
+        [&]() { return pm.plan_install_transaction(packages, force); },
+        [&]() { return pm.install(packages, force); }
+    );
 }
 
 int do_remove(au::PackageManager& pm, const std::vector<std::string>& packages, bool force) {
     ui::action("Checking for reverse dependencies...");
     if (force) ui::warning("Forcing operation, safety checks are disabled!");
 
-    auto plan_result = pm.plan_remove_transaction(packages, force);
-    if (!plan_result) {
-        ui::error(error_to_string(plan_result.error()));
-        return 1;
-    }
-    au::Transaction plan = std::move(*plan_result);
-    if (plan.is_empty()) {
-        ui::warning("Nothing to do.");
-        return 0;
-    }
-    ui::print_transaction_summary(plan);
-    if (!ui::confirm("Proceed with removal?")) {
-        ui::warning("Removal aborted by user.");
-        return 0;
-    }
-
-    auto remove_result = pm.remove(packages, force);
-    if (remove_result) {
-        ui::header("Removal completed successfully.");
-        return 0;
-    }
-    ui::error(error_to_string(remove_result.error()));
-    return 1;
+    return handle_transaction(
+        "removal",
+        [&]() { return pm.plan_remove_transaction(packages, force); },
+        [&]() { return pm.remove(packages, force); }
+    );
 }
 
 // --- Main Function with Advanced Argument Parsing ---
@@ -183,11 +166,9 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> args(argv + 1, argv + argc);
     std::string bootstrap_root = "/";
     bool force_flag = false;
+    bool skip_crypto_flag = false; // REFINED: New flag
 
-    // This vector will hold the command and package names after flags are parsed.
     std::vector<std::string> main_args;
-
-    // A robust argument parsing loop.
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
         if (arg == "--bootstrap") {
@@ -195,12 +176,13 @@ int main(int argc, char* argv[]) {
                 ui::error("--bootstrap requires a directory argument.");
                 return 1;
             }
-            // Consume the next argument as the path and advance the loop counter.
             bootstrap_root = args[++i];
         } else if (arg == "--force") {
             force_flag = true;
-        } else {
-            // This is not a flag, so it must be a command or package name.
+        } else if (arg == "--skip-crypto") { // REFINED: Handle new flag
+            skip_crypto_flag = true;
+        }
+        else {
             main_args.push_back(arg);
         }
     }
@@ -210,16 +192,14 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Initialize the package manager with the (potentially new) root directory.
-    au::PackageManager pm(bootstrap_root);
+    // REFINED: Pass all flags to the PackageManager constructor
+    au::PackageManager pm(bootstrap_root, skip_crypto_flag);
+
     if (bootstrap_root != "/") {
         ui::header(std::string(ui::MAGENTA) + "Operating on bootstrap root: " + bootstrap_root);
     }
 
-    // The first non-flag argument is the command.
     const std::string& command = main_args[0];
-
-    // The rest of the non-flag arguments are the package names.
     std::vector<std::string> packages;
     if (main_args.size() > 1) {
         packages.assign(main_args.begin() + 1, main_args.end());
@@ -236,7 +216,7 @@ int main(int argc, char* argv[]) {
     } else if (command == "remove") {
         if (packages.empty()) { print_usage(); return 1; }
         return do_remove(pm, packages, force_flag);
-    } else if (command == "install-local") { // NEW
+    } else if (command == "install-local") {
         if (packages.empty()) { print_usage(); return 1; }
         return do_install_local(pm, packages, force_flag);
     } else {
