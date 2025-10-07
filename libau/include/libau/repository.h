@@ -21,7 +21,7 @@ namespace au {
         ~RepositoryManager();
 
         // Fetches repository indexes, parses them, and syncs to the database.
-        bool update_all();
+        bool update_all(bool skip_gpg_check = false);
 
         // Finds a package by name across all configured repositories.
         std::optional<Package> find_package(const std::string& package_name) const;

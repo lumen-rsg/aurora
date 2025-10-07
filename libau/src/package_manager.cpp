@@ -7,13 +7,123 @@
 #include "libau/logging.h"
 #include "libau/archive.h" // Needed for extraction
 #include <chrono>
+#include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include "libau/parser.h"
 #include <map>
+#include <ranges>
 #include <sys/wait.h>
+#include <sys/stat.h>
+#include <sys/xattr.h>
+#include <sys/acl.h>
+#include <unistd.h> // for readlink, symlink, chown
+
+#include "libau/crypto.h"
 
 namespace au {
+
+    static bool replicate_object(const std::filesystem::path& from, const std::filesystem::path& to) {
+    // 1. Get metadata of the source object WITHOUT following symlinks.
+    struct stat statbuf{};
+    if (lstat(from.c_str(), &statbuf) != 0) {
+        log::error("Failed to lstat source object: " + from.string());
+        return false;
+    }
+
+    // 2. Replicate the object based on its type.
+    switch (statbuf.st_mode & S_IFMT) {
+        case S_IFLNK: { // It's a symbolic link
+            std::vector<char> buf(statbuf.st_size + 1);
+            ssize_t len = readlink(from.c_str(), buf.data(), buf.size());
+            if (len == -1) {
+                log::error("Failed to read symlink: " + from.string());
+                return false;
+            }
+            buf[len] = '\0';
+            if (symlink(buf.data(), to.c_str()) != 0) {
+                log::error("Failed to create symlink: " + to.string());
+                return false;
+            }
+            break;
+        }
+
+        case S_IFREG: { // It's a regular file
+            std::ifstream in(from, std::ios::binary);
+            if (!in) { log::error("Failed to open source file: " + from.string()); return false; }
+            std::ofstream out(to, std::ios::binary | std::ios::trunc);
+            if (!out) { log::error("Failed to create destination file: " + to.string()); return false; }
+            out << in.rdbuf();
+            break;
+        }
+
+        case S_IFCHR: // Character device
+        case S_IFBLK: { // Block device
+            if (mknod(to.c_str(), statbuf.st_mode, statbuf.st_rdev) != 0) {
+                log::error("Failed to create device node: " + to.string());
+                return false;
+            }
+            break;
+        }
+
+        case S_IFDIR: { // Directory
+             if (mkdir(to.c_str(), statbuf.st_mode) != 0) {
+                 log::error("Failed to create directory: " + to.string());
+                 return false;
+             }
+             break;
+        }
+
+        default:
+            log::error("Unsupported file type for replication: " + from.string());
+            return false;
+    }
+
+    // 3. Copy metadata (permissions, ownership, xattrs, ACLs) for the new object.
+    // For symlinks, we use lchown/lchmod (though they are often ignored).
+    // For everything else, we use the standard calls.
+
+    // Ownership
+    if ((S_IFLNK == (statbuf.st_mode & S_IFMT)) ?
+         lchown(to.c_str(), statbuf.st_uid, statbuf.st_gid) != 0 :
+         chown(to.c_str(), statbuf.st_uid, statbuf.st_gid) != 0) {
+        log::error("Failed to chown destination object: " + to.string());
+    }
+
+    // Permissions (ignored for symlinks)
+    if (S_IFLNK != (statbuf.st_mode & S_IFMT)) {
+        if (chmod(to.c_str(), statbuf.st_mode) != 0) {
+            log::error("Failed to chmod destination object: " + to.string());
+        }
+    }
+
+    // Extended Attributes (using lsetxattr for symlinks)
+    ssize_t list_size = llistxattr(from.c_str(), nullptr, 0);
+    if (list_size > 0) {
+        std::vector<char> names(list_size);
+        llistxattr(from.c_str(), names.data(), names.size());
+        for (const char* name = names.data(); name < names.data() + list_size; name += strlen(name) + 1) {
+            ssize_t value_size = lgetxattr(from.c_str(), name, nullptr, 0);
+            if (value_size >= 0) {
+                std::vector<char> value(value_size);
+                lgetxattr(from.c_str(), name, value.data(), value.size());
+                lsetxattr(to.c_str(), name, value.data(), value.size(), 0);
+            }
+        }
+    }
+
+    // ACLs
+    acl_t acl = acl_get_file(from.c_str(), ACL_TYPE_ACCESS);
+    if (acl) {
+        if (acl_set_file(to.c_str(), ACL_TYPE_ACCESS, acl) != 0) {
+            log::error("Failed to set ACL on destination object: " + to.string());
+        }
+        acl_free(acl);
+    }
+
+    return true;
+}
 
     // Implement the previously stubbed method
     std::expected<void, TransactionError> PackageManager::prepare_transaction_assets(Transaction& transaction) {
@@ -61,6 +171,34 @@ namespace au {
         }
 
         log::ok("All assets downloaded successfully.");
+
+        log::info("Verifying package integrity...");
+
+        // --- NEW: Verify Checksums ---
+        if (m_skip_crypto_checks) {
+            log::warn("Skipping all package integrity checks as requested.");
+        } else {
+            log::info("Verifying package integrity...");
+            for (size_t i = 0; i < transaction.to_install.size(); ++i) {
+                const auto& pkg = transaction.to_install[i].metadata;
+                const auto& path = download_paths[i];
+
+                log::progress("Verifying " + pkg.name + "...");
+                if (!au::verify_file_checksum(path, pkg.checksum)) {
+                    std::filesystem::remove(path);
+                    log::progress_ok();
+                    log::error("Integrity check failed. Aborting transaction.");
+                    return std::unexpected(TransactionError::ChecksumMismatch);
+                }
+            }
+            log::progress_ok();
+        }
+        log::progress_ok(); // Final "OK" for the whole verification step
+
+        for (size_t i = 0; i < transaction.to_install.size(); ++i) {
+            transaction.to_install[i].downloaded_archive_path = download_paths[i];
+        }
+
         return {};
     }
 
@@ -136,7 +274,7 @@ namespace au {
         return ss.str();
     }
 
-    PackageManager::PackageManager(const std::filesystem::path& system_root)
+    PackageManager::PackageManager(const std::filesystem::path& system_root, bool skip_crypto_checks)
             : m_root_path(system_root),
             // All internal paths are relative to the system root
               m_db_path(system_root / "var" / "lib" / "aurora" / "aurora.db"),
@@ -144,7 +282,8 @@ namespace au {
               m_db(m_db_path), // The Database object uses this path
             // Note: The config path for repos should also be inside the root
               m_repo_manager(m_db, system_root / "etc" / "aurora" / "repos.conf"),
-              m_resolver(m_db)
+              m_resolver(m_db),
+              m_skip_crypto_checks(skip_crypto_checks)
     {
         // Ensure the directories for our database and cache exist
         std::filesystem::create_directories(m_db_path.parent_path());
@@ -214,7 +353,7 @@ namespace au {
         log::info("Attempting to install local package: " + package_path.string());
 
         // --- Phase 1: Metadata Extraction and Parsing ---
-        auto meta_content = au::archive::extract_single_file_to_memory(package_path, ".AURORA_META");
+        auto meta_content = au::extract_single_file_to_memory(package_path, ".AURORA_META");
         if (!meta_content) {
             log::error("Could not extract metadata file (.AURORA_META) from package.");
             return std::unexpected(TransactionError::ExtractionFailed);
@@ -226,6 +365,18 @@ namespace au {
             return std::unexpected(TransactionError::ResolutionFailed); // Closest error type
         }
         const Package& pkg = *parse_result;
+
+        // --- NEW: Integrity Check ---
+        log::info("Verifying local package integrity...");
+        if (m_skip_crypto_checks) {
+            log::warn("Skipping local package integrity check as requested.");
+        } else {
+            log::info("Verifying local package integrity...");
+            if (!au::verify_file_checksum(package_path, pkg.checksum)) {
+                return std::unexpected(TransactionError::ChecksumMismatch);
+            }
+            log::ok("Integrity check passed.");
+        }
 
         // --- Phase 2: Pre-flight Checks (Read-only operations) ---
         // 1. Check if already installed
@@ -275,132 +426,187 @@ namespace au {
         return execute_transaction(plan);
     }
 
-    std::expected<void, TransactionError> PackageManager::execute_transaction(const Transaction& plan) {
-    log::info("Executing transaction...");
-    std::vector<InstalledPackage> completed_installs;
+std::expected<void, TransactionError> PackageManager::execute_transaction(const Transaction& plan) {
+    if (plan.is_empty()) {
+        return {};
+    }
+
+    // --- PHASE 0: INITIALIZATION & LOCKING ---
+    // A real implementation should acquire a system-wide lock here (e.g., a PID file)
+    // to prevent concurrent package manager operations.
+
+    const auto tx_id = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    const auto tx_workspace = m_cache_path / "tx" / tx_id;
+    const auto tx_backup_dir = tx_workspace / "backup";
+    std::filesystem::create_directories(tx_backup_dir);
+
+    FileSystemJournal journal;
+        std::map<std::string, std::filesystem::path> post_remove_scripts;
+
+    log::info("Executing transaction " + tx_id + "...");
 
     try {
         const bool use_chroot = (m_root_path != "/");
 
-        // --- STAGE 0: Removals ---
-        if (!plan.to_remove.empty()) {
-            // Run all pre-remove scripts first.
-            log::progress("Running pre-remove scripts...");
-            for (const auto& pkg_to_remove : plan.to_remove) {
-                if (!pkg_to_remove.pre_remove_script.empty()) {
-                    if (!run_pre_script(m_root_path / pkg_to_remove.pre_remove_script, m_root_path)) {
-                        log::error("\nPre-remove script for " + pkg_to_remove.name + " failed.");
-                        throw TransactionError::ScriptletFailed;
-                    }
+        // --- PHASE 1: PREPARE & BACKUP (The "Undo" Log) ---
+        // This is the most critical change. We are moving old files, not deleting them.
+        // A 'move' operation on the same filesystem is atomic.
+        log::progress("Backing up existing files...");
+        for (const auto& pkg_to_remove : plan.to_remove) {
+            for (const auto& file : pkg_to_remove.owned_files) {
+                const auto source_path = m_root_path / file;
+                const auto backup_path = tx_backup_dir / file;
+
+                if (std::filesystem::exists(source_path) || std::filesystem::is_symlink(source_path)) {
+                    std::filesystem::create_directories(backup_path.parent_path());
+                    std::filesystem::rename(source_path, backup_path); // Atomic move
+                    journal.old_files_backed_up[source_path] = backup_path;
                 }
             }
-            log::progress_ok();
+        }
+        log::progress_ok();
 
-            // Remove all files.
-            std::set<std::filesystem::path> parent_dirs;
-            for (const auto& pkg_to_remove : plan.to_remove) {
-                log::progress("Removing files for " + pkg_to_remove.name + "...");
-                for (const auto& file : pkg_to_remove.owned_files) {
-                    const auto full_path = m_root_path / file;
-                    if (std::filesystem::exists(full_path) || std::filesystem::is_symlink(full_path)) {
-                        std::filesystem::remove(full_path);
-                        if (full_path.has_parent_path()) {
-                            parent_dirs.insert(full_path.parent_path());
-                        }
-                    }
+        log::progress("Preparing post-remove scripts...");
+        for (const auto& pkg_to_remove : plan.to_remove) {
+            if (!pkg_to_remove.post_remove_script.empty()) {
+                const auto script_path_in_root = m_root_path / pkg_to_remove.post_remove_script;
+                if (std::filesystem::exists(script_path_in_root)) {
+                    const auto temp_script_path = tx_workspace / (pkg_to_remove.name + "-post-remove");
+                    std::filesystem::copy(script_path_in_root, temp_script_path);
+                    post_remove_scripts[pkg_to_remove.name] = temp_script_path;
                 }
             }
-            log::progress_ok();
+        }
+        log::progress_ok();
 
-            // Commit removals to the database.
-            log::progress("Updating database...");
-            for (const auto& pkg_to_remove : plan.to_remove) {
-                m_db.remove_installed_package(pkg_to_remove.name);
+        // --- PHASE 2: STAGE NEW FILES ---
+        log::progress("Installing packages...");
+        std::vector<InstalledPackage> completed_installs; // To hold metadata for the DB commit
+        for (const auto& install_item : plan.to_install) {
+            const auto& pkg = install_item.metadata;
+            const auto staging_path = m_cache_path / "staging" / pkg.name;
+
+            // 1. Cleanly extract the package to its own staging area.
+            std::filesystem::remove_all(staging_path);
+            std::filesystem::create_directories(staging_path);
+            auto extract_result = au::extract(install_item.downloaded_archive_path, staging_path);
+            if (!extract_result) {
+                std::string msg = "Failed to extract archive for " + pkg.name;
+                log::error("\n" + msg);
+                throw TransactionException(TransactionError::ExtractionFailed, msg);
             }
-            log::progress_ok();
+
+            // 2. Run the pre-install script FROM the staging area.
+            // This runs before the package's files are on the live system.
+            if (!pkg.pre_install_script.empty()) {
+                const auto script_path_in_stage = staging_path / pkg.pre_install_script;
+                if (!run_pre_script(script_path_in_stage, m_root_path)) {
+                    std::string msg = "Pre-install script for " + pkg.name + " failed.";
+                    log::error("\n" + msg);
+                    throw TransactionException(TransactionError::ScriptletFailed, msg);
+                }
+            }
+
+            // 3. Move the extracted files to their final destination.
+            for (const auto& file : *extract_result) {
+                const auto source_path = staging_path / file;
+                const auto dest_path = m_root_path / file;
+
+                if (std::filesystem::exists(dest_path)) {
+                    std::string msg = "\nFile conflict during execution: " + dest_path.string();
+                    log::error("\n" + msg);
+                    // OLD: throw TransactionError::FileSystemError;
+                    // NEW:
+                    throw TransactionException(TransactionError::FileConflict, msg);
+                }
+
+                std::filesystem::create_directories(dest_path.parent_path());
+                std::filesystem::rename(source_path, dest_path); // Atomic move
+                journal.new_files_committed.push_back(dest_path);
+            }
+            std::filesystem::remove_all(staging_path);
+
+            // 4. Prepare metadata for the final database commit.
+            InstalledPackage final_package;
+            static_cast<Package&>(final_package) = pkg;
+            final_package.install_date = get_current_date();
+            final_package.owned_files = *extract_result;
+            completed_installs.push_back(std::move(final_package));
+        }
+        log::progress_ok();
+
+        // --- PHASE 3: DATABASE COMMIT (The Point of No Return) ---
+        log::progress("Committing changes to database...");
+
+        // First, collect the names of packages to be removed for the transaction
+        std::vector<std::string> names_to_remove;
+        names_to_remove.reserve(plan.to_remove.size());
+        for (const auto& pkg_to_remove : plan.to_remove) {
+            names_to_remove.push_back(pkg_to_remove.name);
         }
 
-        // --- STAGE 1: Installations ---
-        if (!plan.to_install.empty()) {
-            for (const auto& install_item : plan.to_install) {
-                const auto& pkg = install_item.metadata;
-                log::progress("Installing " + pkg.name + " " + pkg.version + "...");
+        // Now, call our new, atomic database method.
+        // 'completed_installs' is the vector of new packages to add.
+        if (!m_db.perform_transactional_update(completed_installs, names_to_remove)) {
+            std::string msg = "Database commit failed. Initiating filesystem rollback.";
+            log::error("\n" + msg);
+            throw TransactionException(TransactionError::FileSystemError, msg);
+        }
+        log::progress_ok();
 
-                const auto staging_path = m_cache_path / "staging" / pkg.name;
-                std::filesystem::remove_all(staging_path);
-                std::filesystem::create_directories(staging_path);
+        // --- POST-TRANSACTION HOOKS ---
+        // This happens after the DB commit. The system state is now officially updated.
+        // A failure in a post-script is a WARNING, it should NOT roll back the transaction.
+        log::progress("Running post-transaction hooks...");
 
-                auto extract_result = au::archive::extract(install_item.downloaded_archive_path, staging_path);
-                if (!extract_result) {
-                    log::error("\nFailed to extract archive for " + pkg.name);
-                    throw TransactionError::ExtractionFailed;
+        // 1. Run post-install scripts for newly installed packages.
+        for (const auto& installed_pkg : completed_installs) {
+            if (!installed_pkg.post_install_script.empty()) {
+                // The script is now at its final location within the root.
+                if (!run_post_script(installed_pkg.post_install_script, use_chroot)) {
+                    // Log as a warning, but do not throw. The package is installed.
+                    log::error("\nWarning: Post-install script for " + installed_pkg.name + " failed.");
                 }
-
-                if (!pkg.pre_install_script.empty()) {
-                    if (!run_pre_script(staging_path / pkg.pre_install_script, m_root_path)) {
-                        log::error("\nPre-install script for " + pkg.name + " failed.");
-                        throw TransactionError::ScriptletFailed;
-                    }
-                }
-
-                std::string command = "cp -a " + staging_path.string() + "/. " + m_root_path.string() + "/";
-                int status = std::system(command.c_str());
-
-                if (WEXITSTATUS(status) != 0) {
-                    log::error("\nFailed to copy package payload from staging for " + pkg.name);
-                    throw TransactionError::FileSystemError;
-                }
-
-                std::filesystem::remove_all(staging_path);
-
-                InstalledPackage final_package;
-                static_cast<Package&>(final_package) = pkg;
-                final_package.install_date = get_current_date();
-                final_package.owned_files = *extract_result;
-                completed_installs.push_back(std::move(final_package));
             }
-            log::progress_ok();
-
-            // Commit new packages to the database
-            log::progress("Updating database...");
-            for (const auto& installed_pkg : completed_installs) {
-                m_db.add_installed_package(installed_pkg);
-            }
-            log::progress_ok();
         }
 
-        // --- STAGE 2: Post-transaction Hooks ---
-        if (!completed_installs.empty() || !plan.to_remove.empty()) {
-            log::progress("Running post-transaction hooks...");
-            for (const auto& installed_pkg : completed_installs) {
-                if (!installed_pkg.post_install_script.empty()) {
-                    if (!run_post_script(installed_pkg.post_install_script, use_chroot)) {
-                        log::error("\nWarning: Post-install script for " + installed_pkg.name + " failed.");
-                    }
-                }
-            }
-            for (const auto& pkg_to_remove : plan.to_remove) {
-                if (!pkg_to_remove.post_remove_script.empty()) {
-                    if (!run_post_script(pkg_to_remove.post_remove_script, use_chroot)) {
+        // 2. Run post-remove scripts for removed packages.
+        for (const auto& pkg_to_remove : plan.to_remove) {
+            if (!pkg_to_remove.post_remove_script.empty()) {
+                auto it = post_remove_scripts.find(pkg_to_remove.name);
+                if (it != post_remove_scripts.end()) {
+                    // We run the temporary copy of the script we made earlier.
+                    // Since it's not in the root, we must run it WITHOUT chroot.
+                    // We pass the root as an argument, similar to pre-scripts.
+                    if (!run_pre_script(it->second, m_root_path)) {
                         log::error("\nWarning: Post-remove script for " + pkg_to_remove.name + " failed.");
                     }
                 }
             }
-            log::progress_ok();
         }
+        log::progress_ok();
 
-    } catch (const TransactionError& err) {
-        log::error("A transaction error occurred. Rolling back changes...");
-        for (auto it = completed_installs.rbegin(); it != completed_installs.rend(); ++it) {
-            log::info("Rolling back files for " + it->name);
-            for (const auto& file_to_remove : it->owned_files) {
-                std::error_code ec;
-                std::filesystem::remove(m_root_path / file_to_remove, ec);
-            }
-        }
-        log::ok("Rollback complete.");
-        return std::unexpected(err);
+
+    } catch (const TransactionException& e) {
+        // --- ROLLBACK ---
+        // Use e.what() to get the descriptive message for logging.
+        log::error("Transaction failed: " + std::string(e.what()) + ". Rolling back filesystem changes...");
+
+        rollback_transaction(journal, tx_workspace);
+
+        log::ok("Rollback complete. System restored to original state.");
+        std::filesystem::remove_all(tx_workspace);
+
+        // Use e.get_error() to get the enum for the std::unexpected return.
+        return std::unexpected(e.get_error());
     }
+
+    // --- PHASE 4: CLEANUP (Success) ---
+    // The transaction succeeded. We can now safely delete the backups.
+    log::progress("Cleaning up transaction workspace...");
+    std::filesystem::remove_all(tx_workspace);
+    log::progress_ok();
+    // Release system-wide lock here
 
     log::ok("Transaction completed successfully.");
     return {};
@@ -446,10 +652,9 @@ namespace au {
         }
 
         // --- 2. Perform File Conflict Check ---
-        log::info("Checking for file conflicts...");
+                log::info("Checking for file conflicts...");
 
-        // First, build a master map of all files owned by currently installed packages.
-        // This is much more efficient than repeatedly querying the database.
+        // Build a master map of all files owned by currently installed packages.
         std::map<std::filesystem::path, std::string> all_owned_files;
         for (const auto& installed_pkg : m_db.list_installed_packages()) {
             for (const auto& file : installed_pkg.owned_files) {
@@ -457,18 +662,34 @@ namespace au {
             }
         }
 
-        // Now, check each file from each new package against the master map.
+        // Now, check each file from each new package against the map AND the filesystem.
         for (const auto& pkg_meta : packages_to_install) {
             for (const auto& new_file : pkg_meta.files) {
-                auto it = all_owned_files.find(new_file);
-                if (it != all_owned_files.end()) {
-                    // Conflict found!
+                const auto& owner_lookup = all_owned_files.find(new_file);
+
+                // STAGE 1: Check if the file is owned by another package in the DB.
+                if (owner_lookup != all_owned_files.end()) {
+                    // Conflict found with an owned file.
                     if (!force) {
-                        const std::string& owner_pkg_name = it->second;
-                        log::error("File conflict detected! Package '" + pkg_meta.name +
+                        const std::string& owner_pkg_name = owner_lookup->second;
+                        log::error("File conflict: Package '" + pkg_meta.name +
                                    "' wants to install '" + new_file.string() +
                                    "', which is already owned by '" + owner_pkg_name + "'.");
                         return std::unexpected(TransactionError::FileConflict);
+                    }
+                }
+                // STAGE 2: Check for unowned files on the live filesystem.
+                else {
+                    const auto path_on_disk = m_root_path / new_file;
+                    // We must check for both regular files and symlinks.
+                    if (std::filesystem::exists(path_on_disk) || std::filesystem::is_symlink(path_on_disk)) {
+                        // The file exists on disk but is not in our ownership map.
+                        if (!force) {
+                             log::error("File conflict: Package '" + pkg_meta.name +
+                                       "' wants to install '" + new_file.string() +
+                                       "', which already exists on the filesystem and is not owned by any package.");
+                             return std::unexpected(TransactionError::FileConflict);
+                        }
                     }
                 }
             }
@@ -638,7 +859,27 @@ namespace au {
 
     bool PackageManager::sync_database() {
         log::info("Syncing repositories to local database...");
-        return m_repo_manager.update_all();
+        return m_repo_manager.update_all(m_skip_crypto_checks);
+    }
+
+    void PackageManager::rollback_transaction(const FileSystemJournal& journal, const std::filesystem::path& tx_workspace) {
+        // 1. Undo new file installations by removing them.
+        // We iterate in reverse in case there were directory creations.
+        for (const auto & it : std::ranges::reverse_view(journal.new_files_committed)) {
+            std::error_code ec;
+            std::filesystem::remove(it, ec);
+        }
+
+        // 2. Restore backed-up files by moving them back.
+        for (const auto& [original_path, backup_path] : journal.old_files_backed_up) {
+            if (std::filesystem::exists(backup_path)) {
+                // Ensure parent directory exists before moving back
+                if (original_path.has_parent_path()) {
+                    std::filesystem::create_directories(original_path.parent_path());
+                }
+                std::filesystem::rename(backup_path, original_path);
+            }
+        }
     }
 
 

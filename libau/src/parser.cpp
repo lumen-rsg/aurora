@@ -67,6 +67,10 @@ namespace au {
         pkg.pre_remove_script = get_optional_scalar(node, "pre_remove");
         pkg.post_remove_script = get_optional_scalar(node, "post_remove");
 
+        auto checksum_res = get_required_scalar<std::string>(node, "checksum");
+        if (!checksum_res) return std::unexpected(checksum_res.error());
+        pkg.checksum = *checksum_res;
+
         if (node["files"] && node["files"].IsSequence()) {
             for (const auto& item : node["files"]) {
                 pkg.files.emplace_back(item.as<std::string>());

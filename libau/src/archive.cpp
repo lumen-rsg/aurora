@@ -1,85 +1,70 @@
 #include "libau/archive.h"
 #include "libau/logging.h"
-#include <cstdio>
-#include <memory>
-#include <array>
-#include <stdexcept>
-#include <sys/wait.h>
-#include <sstream>
+#include <archive.h>
+#include <archive_entry.h>
+#include <vector>
+#include <string>
 
-namespace au::archive {
-
-    // RAII helper to safely manage changing the current working directory.
-    class CWDGuard {
-    public:
-        CWDGuard() : m_old_path(std::filesystem::current_path()) {}
-        ~CWDGuard() {
-            std::error_code ec;
-            std::filesystem::current_path(m_old_path, ec);
+namespace au {
+    // Helper to ensure archive structs are always freed
+    struct ArchiveReadGuard {
+        archive* a;
+        ArchiveReadGuard(archive* arch) : a(arch) {}
+        ~ArchiveReadGuard() {
+            if (a) {
+                archive_read_free(a);
+            }
         }
-    private:
-        std::filesystem::path m_old_path;
     };
-
-// Helper to execute a command and capture its stdout.
-// Throws a runtime_error on failure.
-    static std::string exec_and_capture(const char* cmd) {
-        std::array<char, 128> buffer;
-        std::string result;
-        // Use a unique_ptr for RAII-style cleanup of the FILE* handle from popen
-        std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
-        if (!pipe) {
-            throw std::runtime_error("popen() failed!");
-        }
-        while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-            result += buffer.data();
-        }
-        return result;
-    }
 
     std::expected<std::vector<std::filesystem::path>, ExtractError> extract(
         const std::filesystem::path& archive_path,
         const std::filesystem::path& destination_path)
     {
-        std::filesystem::create_directories(destination_path);
+        archive* a = archive_read_new();
+        ArchiveReadGuard guard(a);
+        archive_read_support_filter_all(a);
+        archive_read_support_format_all(a);
 
-        // --- Phase 1: Extract the entire archive ---
-        // We do NOT change the CWD of our C++ program.
-        // We tell `tar` to extract its contents into the destination directory.
-        std::string extract_command = "tar -x -f " + archive_path.string() + " -C " + destination_path.string();
-
-        int status = std::system(extract_command.c_str());
-        if (WEXITSTATUS(status) != 0) {
-            log::error("tar extraction command failed with exit code: " + std::to_string(WEXITSTATUS(status)));
-            return std::unexpected(ExtractError::ExtractData);
+        if (archive_read_open_filename(a, archive_path.c_str(), 10240) != ARCHIVE_OK) {
+            log::error("libarchive could not open file: " + std::string(archive_error_string(a)));
+            return std::unexpected(ExtractError::OpenFile);
         }
 
-        // --- Phase 2: Generate a reliable file list ---
-        // After extraction, we use `find` inside the destination to get a list
-        // of ONLY regular files, ignoring directories and symlinks.
+        std::filesystem::create_directories(destination_path);
         std::vector<std::filesystem::path> extracted_files;
-        try {
-            CWDGuard guard; // Safely change directory for the find command
-            std::filesystem::current_path(destination_path);
+        archive_entry* entry;
 
-            // `find . -type f` is the most reliable way to list only files.
-            std::string file_list_str = exec_and_capture("find . -type f");
+        while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+            const std::filesystem::path current_file = archive_entry_pathname(entry);
 
-            std::stringstream ss(file_list_str);
-            std::string line;
-            while (std::getline(ss, line)) {
-                // Strip the leading "./"
-                if (line.rfind("./", 0) == 0) {
-                    line = line.substr(2);
-                }
-                if (line.empty() || line == ".AURORA_META") {
-                    continue;
-                }
-                extracted_files.emplace_back(line);
+            // Security: Prevent path traversal ("zip slip") attacks.
+            // We normalize the path and check if it still starts with the destination.
+            const auto full_dest_path = (destination_path / current_file).lexically_normal();
+            auto [root, rest] = std::mismatch(destination_path.begin(), destination_path.end(), full_dest_path.begin());
+            if (root != destination_path.end()) {
+                log::error("Archive contains malicious path: " + current_file.string());
+                return std::unexpected(ExtractError::ExtractHeader);
             }
-        } catch (const std::exception& e) {
-            log::error("Failed to generate file list after extraction: " + std::string(e.what()));
-            return std::unexpected(ExtractError::InternalError);
+
+            archive_entry_set_pathname(entry, full_dest_path.c_str());
+
+            if (archive_read_extract(a, entry, 0) != ARCHIVE_OK) {
+                log::error("libarchive failed to extract: " + std::string(archive_error_string(a)));
+                return std::unexpected(ExtractError::ExtractData);
+            }
+
+            // We only add regular files to our manifest list, not directories.
+            if (AE_IFREG == archive_entry_filetype(entry)) {
+                // We return the path relative to the destination, not the full system path.
+                extracted_files.push_back(current_file);
+            }
+        }
+
+        // Check for a final error after the loop
+        if (archive_errno(a) != 0) {
+            log::error("libarchive read error: " + std::string(archive_error_string(a)));
+            return std::unexpected(ExtractError::ReadHeader);
         }
 
         return extracted_files;
@@ -90,44 +75,37 @@ namespace au::archive {
             const std::filesystem::path& archive_path,
             const std::filesystem::path& file_inside_archive)
     {
-        std::string path_in_archive = "./" + file_inside_archive.string();
+        archive* a = archive_read_new();
+        ArchiveReadGuard guard(a);
+        archive_read_support_filter_all(a);
+        archive_read_support_format_all(a);
 
-        // The tar `-O` flag directs the output of the extracted file to stdout.
-        std::string command = "tar -x -O -f " + archive_path.string() + " " + path_in_archive;
-
-        try {
-            // We need to check the return code of the command itself.
-            // popen doesn't give us this directly, so we'll switch to a slightly different method.
-            std::array<char, 128> buffer;
-            std::string result;
-
-            // Append stderr redirection to capture tar's error messages
-            command += " 2>&1";
-
-            FILE* pipe = popen(command.c_str(), "r");
-            if (!pipe) {
-                throw std::runtime_error("popen() failed!");
-            }
-
-            while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
-                result += buffer.data();
-            }
-
-            int return_code = pclose(pipe);
-
-            // WEXITSTATUS extracts the actual exit code from the status returned by pclose
-            if (WEXITSTATUS(return_code) != 0) {
-                // Tar failed. The 'result' string now contains its stderr message.
-                log::error("tar command failed: " + result);
-                return std::unexpected(ExtractError::ReadHeader);
-            }
-
-            return result;
-
-        } catch (const std::exception& e) {
-            log::error("Failed to extract '" + file_inside_archive.string() + "' from archive: " + std::string(e.what()));
-            return std::unexpected(ExtractError::InternalError);
+        if (archive_read_open_filename(a, archive_path.c_str(), 10240) != ARCHIVE_OK) {
+            log::error("libarchive could not open file: " + std::string(archive_error_string(a)));
+            return std::unexpected(ExtractError::OpenFile);
         }
-    }
 
-} // namespace au::archive
+        archive_entry* entry;
+        while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+            if (std::filesystem::path(archive_entry_pathname(entry)) == file_inside_archive) {
+                la_int64_t size = archive_entry_size(entry);
+                std::string content;
+                content.resize(size);
+
+                la_ssize_t read_bytes = archive_read_data(a, &content[0], content.size());
+                if (read_bytes < 0) {
+                    log::error("libarchive failed to read data: " + std::string(archive_error_string(a)));
+                    return std::unexpected(ExtractError::ReadHeader);
+                }
+                if (static_cast<la_int64_t>(read_bytes) != size) {
+                    log::error("Incomplete read of in-archive file.");
+                    return std::unexpected(ExtractError::InternalError);
+                }
+                return content;
+            }
+        }
+
+        log::error("File not found in archive: " + file_inside_archive.string());
+        return std::unexpected(ExtractError::ReadHeader); // Closest error enum
+    }
+}

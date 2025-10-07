@@ -8,7 +8,7 @@
 #include <vector>
 #include <expected>
 
-namespace au::archive {
+namespace au {
 
     enum class ExtractError {
         OpenFile,

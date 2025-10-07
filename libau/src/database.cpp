@@ -334,4 +334,34 @@ namespace au {
         return result;
     }
 
+    bool Database::perform_transactional_update(
+    const std::vector<InstalledPackage>& packages_to_add,
+    const std::vector<std::string>& package_names_to_remove)
+    {
+        try {
+            // sqlite_orm's transaction method takes a lambda.
+            // It returns true if the lambda returns true (commit).
+            // It rolls back if the lambda returns false or throws an exception.
+            return pimpl->storage.transaction([&] {
+
+                // 1. Perform all removals
+                for (const auto& name : package_names_to_remove) {
+                    pimpl->storage.remove<db_schema::InstalledPackage>(name);
+                }
+
+                // 2. Perform all additions/updates
+                for (const auto& pkg : packages_to_add) {
+                    pimpl->storage.replace(to_db(pkg));
+                }
+
+                // 3. Return true to commit the transaction.
+                return true;
+            });
+
+        } catch (const std::exception& e) {
+            log::error(std::string("Database transaction failed (rolled back): ") + e.what());
+            return false; // The transaction was rolled back due to the exception.
+        }
+    }
+
 } // namespace au

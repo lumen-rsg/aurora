@@ -12,6 +12,8 @@
 #include <sstream>
 #include <map>
 
+#include "libau/crypto.h"
+
 namespace au {
 
 
@@ -58,7 +60,7 @@ namespace au {
     RepositoryManager::~RepositoryManager() = default;
 
     // The main function that orchestrates the update
-    bool RepositoryManager::update_all() {
+    bool RepositoryManager::update_all(bool skip_gpg_check) {
         pimpl->load_config(); // Re-read config in case it changed
 
         std::vector<Package> all_packages;
@@ -71,25 +73,38 @@ namespace au {
             log::info("Updating repository '" + repo.name + "'...");
 
             const std::string index_url = repo.url + "/repo.yaml";
+            const std::string sig_url = repo.url + "/repo.yaml.sig";
             const auto temp_path = std::filesystem::temp_directory_path() / (repo.name + ".yaml.tmp");
+            const auto temp_sig_path = std::filesystem::temp_directory_path() / (repo.name + ".yaml.sig.tmp");
 
-            // Create a download job for this single repository index file.
+            // Download both the index and the signature file
             std::vector<DownloadJob> jobs = {
-                    {
-                            index_url,
-                            temp_path,
-                            "repo: " + repo.name
-                    }
+                { repo.url + "/repo.yaml", temp_path, "index: " + repo.name }
             };
+            if (!skip_gpg_check) {
+                jobs.emplace_back(repo.url + "/repo.yaml.sig", temp_sig_path, "sig: " + repo.name);
+            }
 
-            // Execute the download.
-            bool download_success = downloader.download_all(jobs);
-
-            if (!download_success) {
-                log::error("Failed to download index for repo '" + repo.name + "'.");
+            if (!downloader.download_all(jobs)) {
+                log::error("Failed to download index/signature for repo '" + repo.name + "'.");
                 all_succeeded = false;
-                std::filesystem::remove(temp_path); // Clean up partial download
-                continue; // Move to the next repo
+                std::filesystem::remove(temp_path);
+                std::filesystem::remove(temp_sig_path);
+                continue;
+            }
+
+            // --- NEW: GPG VERIFICATION ---
+            if (skip_gpg_check) {
+                log::warn("Skipping GPG authenticity check for repository '" + repo.name + "'.");
+            } else {
+                if (!au::verify_repository_signature(temp_path, temp_sig_path)) {
+                    log::error("Repository '" + repo.name + "' failed authenticity check. Skipping.");
+                    all_succeeded = false;
+                    std::filesystem::remove(temp_path);
+                    std::filesystem::remove(temp_sig_path);
+                    continue;
+                }
+                log::ok("Repository '" + repo.name + "' authenticity verified.");
             }
 
             auto parse_result = Parser::parse_repository_index(temp_path);

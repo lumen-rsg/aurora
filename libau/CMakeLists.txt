@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(SQLite3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(CURL REQUIRED)
+PKG_CHECK_MODULES(Gpgme REQUIRED)
 
 # Define the library target.
 add_library(au STATIC
@@ -36,6 +37,7 @@ target_link_libraries(au
         PRIVATE
         yaml-cpp::yaml-cpp
         CURL::libcurl
+        gpgme
 )
 
 # Installation rules remain the same.
